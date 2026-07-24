@@ -30,14 +30,18 @@ profile whose two Max subscriptions rotate serially inside it.
 
 ## Install
 
+Clone it anywhere — the wrapper self-locates, so `~/code` below is just an
+example (nothing is hardcoded to a particular directory):
+
 ```sh
-git clone https://github.com/deviationist/claude-profile ~/.zsh/claude-profile
-echo 'source ~/.zsh/claude-profile/claude-profile.zsh' >> ~/.zshrc
-cp ~/.zsh/claude-profile/.env.example ~/.zsh/claude-profile/.env   # optional knobs
+git clone https://github.com/deviationist/claude-profile ~/code/claude-profile
+echo 'source ~/code/claude-profile/claude-profile.zsh' >> ~/.zshrc
+cp ~/code/claude-profile/.env.example ~/code/claude-profile/.env   # optional knobs
 ```
 
-Requirements: zsh, python3 (stdlib only), macOS `security`. Optional: `fzf`
-(interactive pickers), [`claude-usage`](https://github.com/deviationist/claude-statusline)
+Requirements: zsh, python3 (stdlib only). Credential store: the macOS Keychain
+(uses `security`) or, on Linux, files — nothing extra to install on either.
+Optional: `fzf` (interactive pickers), [`claude-usage`](https://github.com/deviationist/claude-usage)
 (statusline integration — auto-routed per profile).
 
 ## Configure
