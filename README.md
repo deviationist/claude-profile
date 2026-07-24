@@ -55,6 +55,9 @@ edit this by hand; the CLI reads it:
     "token_url":  "<claude-code-token-endpoint-url>",
     "usage_url":  "<claude-code-usage-endpoint-url>",
     "user_agent": "<claude-code-user-agent>"
+  },
+  "keepalive": {                    // OPTIONAL — per-account; omitted account = kept alive (true)
+    "max5x": false                  // don't auto-renew this account's refresh token
   }
 }
 ```
@@ -128,6 +131,7 @@ claude-profile delete [<name>]     delete an account's parked credential +
 claude-profile rotate [--dry-run]  switch to the next non-exhausted account
 claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
+claude-profile keepalive [<account>] [on|off]  per-account keep-alive toggle (no args = report)
 claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
 claude-profile daemon install [--jitter N]|uninstall|status   launchd keep-alive
 claude-with <profile> [args]       one-shot launch against a profile
@@ -159,14 +163,22 @@ only an account left untouched for weeks can age out.
 Two lines of defence when one does age:
 
 **1. Keep-alive (`refresh` + daemon).** `claude-profile refresh` performs
-the same OAuth refresh grant Claude Code uses (endpoint + public client id
-as shipped in the binary) on parked accounts whose refresh token has fewer
-than 14 days left (`--min-days-left`), and re-parks the new pair. Safety
+the same OAuth refresh grant Claude Code uses (client id + endpoint from your
+[OAuth config](#oauth-constants)) on parked accounts whose refresh token has
+fewer than 14 days left (`--min-days-left`), and re-parks the new pair. Safety
 ordering: live accounts are never touched (their tokens refresh
 themselves), the new pair is written **and read back** from the Keychain
 before success is declared, and a mutation lock serializes it against
 manual swaps. `claude-profile daemon install` registers a launchd agent
 running it daily (`daemon status` / `daemon uninstall` to inspect/remove).
+
+Keep-alive is **per-account and opt-out**: every account is renewed by
+default, but `claude-profile keepalive <account> off` excludes one from the
+daemon (it then ages out on its own — `status` shows `keep-alive OFF` and
+still warns as it nears expiry). Turn it back on with `keepalive <account>
+on`; `claude-profile keepalive` with no args reports every account's state.
+An explicit `claude-profile refresh <account>` always runs regardless of the
+toggle — the switch only governs the unattended daemon sweep.
 
 The daemon fires at a fixed time (12:17) + login, but only ~once per
 14-day window does it actually make a network call. To keep that call off a
