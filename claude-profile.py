@@ -47,23 +47,32 @@ ACCOUNTS_DIR = os.path.join(STATE_DIR, "accounts")
 DEFAULT_CLAUDE_DIR = os.path.join(HOME, ".claude")
 LIVE_SERVICE_DEFAULT = "Claude Code-credentials"
 PARKED_SERVICE_PREFIX = "claude-profile-parked-"
-USAGE_URL = "https://SET-CLAUDE-CODE-USAGE-URL"
 USAGE_TTL = 60  # seconds; server-side usage cache freshness
-
-# OAuth refresh grant — endpoint + public client id as shipped in the Claude
-# Code binary (v2.1.206: TOKEN_URL "https://SET-CLAUDE-CODE-TOKEN-URL",
-# client id present verbatim). Env overrides exist for testing and for the day
-# these move again.
-TOKEN_URL = os.environ.get(
-    "CLAUDE_PROFILE_TOKEN_URL", "https://SET-CLAUDE-CODE-TOKEN-URL"
-)
-OAUTH_CLIENT_ID = os.environ.get(
-    "CLAUDE_PROFILE_CLIENT_ID", "SET-CLAUDE-CODE-OAUTH-CLIENT-ID"
-)
-# Cloudflare in front of the endpoints rejects python-urllib's signature
-# (error 1010), so all HTTP goes through curl with a CLI-shaped User-Agent.
-USER_AGENT = os.environ.get("CLAUDE_PROFILE_UA", "SET-CLAUDE-CODE-USER-AGENT")
 LAUNCHD_LABEL = "com.claude-profile.refresh"
+
+# Anthropic's OAuth client id + endpoints and Claude Code's User-Agent identify
+# Claude Code's own OAuth client, not this tool — so they are deliberately NOT
+# distributed here and never committed. Supply them per machine: an environment
+# override wins, else the "oauth" block of config.json (see README → "OAuth
+# constants"). When absent, profile/account switching still works fully; only
+# the network features (refresh / usage / exhaustion auto-rotate) go inert and
+# say so, rather than shipping a baked-in default.
+_OAUTH_ENV = {
+    "client_id": "CLAUDE_PROFILE_CLIENT_ID",
+    "token_url": "CLAUDE_PROFILE_TOKEN_URL",
+    "usage_url": "CLAUDE_PROFILE_USAGE_URL",
+    "user_agent": "CLAUDE_PROFILE_UA",
+}
+
+
+def oauth_setting(key):
+    """Resolve an Anthropic OAuth constant: env override → config `oauth` block
+    → None. Ships no default (see the note above)."""
+    v = os.environ.get(_OAUTH_ENV[key])
+    if v:
+        return v
+    cfg = load_config(required=False)
+    return (cfg.get("oauth") or {}).get(key) if cfg else None
 
 
 def curl_json(url, body=None, bearer=None):
@@ -71,14 +80,18 @@ def curl_json(url, body=None, bearer=None):
     argv: a POST body travels on stdin, a bearer token travels as a header
     read from stdin (-H @-). body and bearer are mutually exclusive here.
     Returns (status:int, data:dict|None, err:str)."""
+    # Cloudflare in front of the endpoints rejects python-urllib's signature
+    # (error 1010); curl carrying the configured (CLI) User-Agent is accepted.
     cmd = [
         "curl", "-sS", "--connect-timeout", "5", "--max-time", "15",
-        "-H", f"User-Agent: {USER_AGENT}",
         "-H", "Accept: application/json",
         "-H", "anthropic-beta: oauth-2025-04-20",
         "-w", "\n%{http_code}",
         url,
     ]
+    ua = oauth_setting("user_agent")
+    if ua:
+        cmd += ["-H", f"User-Agent: {ua}"]
     inp = None
     if body is not None:
         inp = json.dumps(body)
@@ -396,7 +409,10 @@ def live_sessions(d):
 # ── usage / exhaustion ──────────────────────────────────────────────────────
 
 def fetch_usage(token):
-    status, data, _ = curl_json(USAGE_URL, bearer=token)
+    url = oauth_setting("usage_url")
+    if not url:
+        return None  # usage endpoint not configured → usage simply "unknown"
+    status, data, _ = curl_json(url, bearer=token)
     if status != 200 or not isinstance(data, dict) or data.get("error"):
         return None
     return data
@@ -583,12 +599,19 @@ def activate_account(cfg, state, profile, target):
 def oauth_refresh_grant(refresh_token):
     """Perform the OAuth refresh grant Claude Code itself uses. Returns the
     parsed response dict, or raises RuntimeError with a terse reason."""
+    token_url = oauth_setting("token_url")
+    client_id = oauth_setting("client_id")
+    if not token_url or not client_id:
+        raise RuntimeError(
+            "OAuth token_url/client_id not configured — add them to the config "
+            "\"oauth\" block (see README → \"OAuth constants\")"
+        )
     status, data, err = curl_json(
-        TOKEN_URL,
+        token_url,
         body={
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": OAUTH_CLIENT_ID,
+            "client_id": client_id,
         },
     )
     if status == 200 and isinstance(data, dict) and data.get("access_token"):
