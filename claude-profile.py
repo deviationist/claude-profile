@@ -27,6 +27,7 @@ import datetime
 import json
 import os
 import random
+import signal
 import subprocess
 import sys
 import tempfile
@@ -420,6 +421,65 @@ def live_sessions(d):
             pass  # exists, not ours — still counts
         live.append({"pid": pid, "cwd": s.get("cwd"), "status": s.get("status")})
     return live
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, not ours
+
+
+def kill_sessions(sessions, wait=6.0):
+    """Terminate the given live sessions: SIGTERM, then SIGKILL any still alive
+    after `wait` seconds. Returns the pids acted on."""
+    pids = [s["pid"] for s in sessions]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + wait
+    alive = list(pids)
+    while alive and time.time() < deadline:
+        time.sleep(0.2)
+        alive = [p for p in alive if _pid_alive(p)]
+    for pid in alive:  # stragglers
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return pids
+
+
+def ensure_swappable(d, force):
+    """Credential-swap guard for config dir `d`. No live sessions → return.
+    Live sessions + not force → refuse (a swap under a running session can
+    corrupt its credentials). Live sessions + force → terminate them first,
+    then verify they're gone (abort if not)."""
+    sessions = live_sessions(d)
+    if not sessions:
+        return
+    pids = ", ".join(str(s["pid"]) for s in sessions)
+    if not force:
+        die(
+            f"{len(sessions)} live Claude session(s) in {d} (pids {pids}) — "
+            f"a swap under a running session can corrupt its credentials. "
+            f"Close them, or use --force to terminate them first.",
+            code=2,
+        )
+    print(f"--force: terminating {len(sessions)} live Claude session(s) (pids {pids})", file=sys.stderr)
+    kill_sessions(sessions)
+    still = live_sessions(d)
+    if still:
+        die(
+            "could not terminate session(s) "
+            f"(pids {', '.join(str(s['pid']) for s in still)}) — aborting swap",
+            code=2,
+        )
 
 
 # ── usage / exhaustion ──────────────────────────────────────────────────────
@@ -1075,20 +1135,34 @@ def cmd_account(args):
     if current == args.name:
         print(f"\"{args.name}\" is already the live account of {profile}")
         return
-    sessions = live_sessions(d)
-    if sessions and not args.force:
-        pids = ", ".join(str(s["pid"]) for s in sessions)
-        die(
-            f"{len(sessions)} live Claude session(s) in {d} (pids {pids}) — "
-            f"a swap under a running session can corrupt its credentials. "
-            f"Close them or use --force",
-            code=2,
-        )
+    ensure_swappable(d, args.force)
     state = load_state()
     with mutation_lock():
         activate_account(cfg, state, profile, args.name)
     email = (load_snapshot(args.name) or {}).get("oauthAccount", {}).get("emailAddress", "?")
     print(f"{profile}: live account → \"{args.name}\" ({email}). Restart claude to use it.")
+
+
+def cmd_toggle(args):
+    """Switch to the NEXT account in the profile's list (cyclic). With two
+    accounts this simply flips between them."""
+    cfg = load_config()
+    profile = pick_profile(cfg, args)
+    accounts = profile_accounts(cfg, profile)
+    if len(accounts) < 2:
+        die(f"profile \"{profile}\" has {len(accounts)} account(s) — toggle needs at least 2")
+    current = current_account_of(cfg, profile)
+    if current in accounts:
+        target = accounts[(accounts.index(current) + 1) % len(accounts)]
+    else:
+        target = accounts[0]  # live account unrecognized → start at the first
+    d = profile_dir(cfg, profile)
+    ensure_swappable(d, args.force)
+    state = load_state()
+    with mutation_lock():
+        activate_account(cfg, state, profile, target)
+    email = (load_snapshot(target) or {}).get("oauthAccount", {}).get("emailAddress", "?")
+    print(f"{profile}: \"{current or '?'}\" → \"{target}\" ({email}). Restart claude to use it.")
 
 
 def cmd_delete(args):
@@ -1351,8 +1425,13 @@ def main():
     p = sub.add_parser("account", help="swap the live account (serial)")
     p.add_argument("name")
     p.add_argument("--profile")
-    p.add_argument("--force", action="store_true", help="swap even with live sessions (unsafe)")
+    p.add_argument("--force", action="store_true", help="terminate live sessions in the dir first, then swap")
     p.set_defaults(func=cmd_account)
+
+    p = sub.add_parser("toggle", help="switch to the next account (cyclic; flips between two)")
+    p.add_argument("--profile")
+    p.add_argument("--force", action="store_true", help="terminate live sessions in the dir first, then swap")
+    p.set_defaults(func=cmd_toggle)
 
     p = sub.add_parser("delete", help="delete an account's parked credential + snapshot (reverts save/auth)")
     p.add_argument("name")

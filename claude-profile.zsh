@@ -142,7 +142,7 @@ claude-profile() {
   # refresh so the statusline catches up within ~a second. (Only one account is
   # live per dir, so the dir-keyed cache is correct once refreshed — no need to
   # pay a per-tick .claude.json read to key the cache per account.)
-  if (( _rc == 0 )) && [[ "$1" == (account|rotate) && "$*" != *--dry-run* ]] \
+  if (( _rc == 0 )) && [[ "$1" == (account|toggle|rotate) && "$*" != *--dry-run* ]] \
      && (( ${+functions[claude-usage]} )); then
     ( claude-usage --fresh >/dev/null 2>&1 & )
   fi

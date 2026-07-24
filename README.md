@@ -123,6 +123,8 @@ claude-profile                     status: profiles, accounts, token expiry, usa
 claude-profile status --usage      …with fresh usage from the API
 claude-profile use [<name>|default]   toggle the active profile (fzf picker w/o name)
 claude-profile account [<name>]    swap the live account (serial; fzf picker w/o name)
+claude-profile toggle              switch to the NEXT account (flips between two)
+                                   (account/toggle take --force = kill live sessions first)
 claude-profile save <name>         park the dir's current login as account <name>
 claude-profile auth [<name>]       re-authenticate an account via a throwaway
                                    config dir — live profiles untouched
@@ -218,7 +220,9 @@ Nothing else in the config dir is account-bound. A swap:
 
 1. **refuses if live sessions** are running out of the dir (session registry
    + pid liveness) — swapping under a running process risks the old session
-   clobbering the new tokens on refresh (`--force` exists; don't),
+   clobbering the new tokens on refresh. `--force` **terminates those sessions
+   first** (SIGTERM, then SIGKILL) and verifies they're gone, so the swap is
+   still safe rather than racing a live process,
 2. re-parks the outgoing account's current blob (so its refresh token stays
    fresh — rotation only happens on use),
 3. writes the incoming account's parked blob into the live Keychain item
