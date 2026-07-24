@@ -356,9 +356,102 @@ def all_parked_names():
     return names
 
 
+# ── credential store (platform-dispatched) ──────────────────────────────────
+# macOS keeps credentials in the login Keychain (the keychain_*/_security
+# functions above). Linux has no Keychain, so it mirrors Claude Code's own
+# scheme: the LIVE credential is the <dir>/.credentials.json file Claude Code
+# reads, and PARKED credentials are mode-0600 files under the state dir. The
+# blob format is identical on both platforms (JSON {"claudeAiOauth": {...}}),
+# so save / swap / refresh work the same. (Trade-off on Linux: parked tokens
+# sit as 0600 files on disk — same protection as Claude Code's own credential,
+# weaker than the macOS Keychain.)
+
+IS_MACOS = sys.platform == "darwin"
+PARKED_DIR = os.path.join(STATE_DIR, "parked")
+
+
+def live_cred_path(d):
+    return os.path.join(expand(d), ".credentials.json")
+
+
+def parked_cred_path(name):
+    return os.path.join(PARKED_DIR, f"{name}.json")
+
+
+def live_cred_desc(d):
+    """Where the live credential for `d` lives — for error messages (Keychain
+    service on macOS, file path on Linux)."""
+    return live_service(d) if IS_MACOS else live_cred_path(d)
+
+
+def _file_read(path):
+    try:
+        with open(path) as f:
+            return f.read().rstrip("\n") or None
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError, OSError):
+        return None
+
+
+def _file_write(path, blob):
+    """Atomically write `blob` at mode 0600 — the blob holds live tokens."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(blob if blob.endswith("\n") else blob + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _file_delete(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def read_live_cred(d):
+    return keychain_read(live_service(d)) if IS_MACOS else _file_read(live_cred_path(d))
+
+
+def write_live_cred(d, blob):
+    return keychain_write(live_service(d), blob) if IS_MACOS else _file_write(live_cred_path(d), blob)
+
+
+def delete_live_cred(d):
+    return keychain_delete(live_service(d)) if IS_MACOS else _file_delete(live_cred_path(d))
+
+
+def read_parked_cred(name):
+    return keychain_read(parked_service(name)) if IS_MACOS else _file_read(parked_cred_path(name))
+
+
+def write_parked_cred(name, blob):
+    return keychain_write(parked_service(name), blob) if IS_MACOS else _file_write(parked_cred_path(name), blob)
+
+
+def delete_parked_cred(name):
+    return keychain_delete(parked_service(name)) if IS_MACOS else _file_delete(parked_cred_path(name))
+
+
+def parked_names():
+    if IS_MACOS:
+        return all_parked_names()
+    if not os.path.isdir(PARKED_DIR):
+        return set()
+    return {fn[:-5] for fn in os.listdir(PARKED_DIR) if fn.endswith(".json")}
+
+
 def saved_account_names():
-    """Every account with stored artifacts: snapshot and/or parked item."""
-    return set(all_snapshots()) | all_parked_names()
+    """Every account with stored artifacts: snapshot and/or parked credential."""
+    return set(all_snapshots()) | parked_names()
 
 
 def all_snapshots():
@@ -571,9 +664,9 @@ def account_usage(cfg, state, profile, account, ttl=USAGE_TTL):
 
     blob = None
     if current_account_of(cfg, profile) == account:
-        blob = keychain_read(live_service(profile_dir(cfg, profile)))
+        blob = read_live_cred(profile_dir(cfg, profile))
     if blob is None:
-        blob = keychain_read(parked_service(account))
+        blob = read_parked_cred(account)
     token = token_from_blob(blob) if blob else None
     if not token:
         return (cache or {}).get("limits"), None
@@ -625,10 +718,10 @@ def park_current(cfg, profile):
             f"the account currently live in {d} has no snapshot — run "
             f"`claude-profile save <name>` for it first"
         )
-    blob = keychain_read(live_service(d))
+    blob = read_live_cred(d)
     if blob is None:
-        die(f"no live credential found in Keychain for {d} ({live_service(d)})")
-    keychain_write(parked_service(name), blob)
+        die(f"no live credential found for {d} ({live_cred_desc(d)})")
+    write_parked_cred(name, blob)
     # refresh the metadata snapshot too (profileFetchedAt etc. move on)
     cj = load_claude_json(d) or {}
     snap = load_snapshot(name) or {}
@@ -651,13 +744,13 @@ def activate_account(cfg, state, profile, target):
     snap = load_snapshot(target)
     if not snap:
         die(f"account \"{target}\" has no snapshot — bootstrap it with `claude-profile save {target}`")
-    blob = keychain_read(parked_service(target))
+    blob = read_parked_cred(target)
     if blob is None:
         die(f"account \"{target}\" has no parked credential — bootstrap it with `claude-profile save {target}`")
 
     park_current(cfg, profile)
 
-    keychain_write(live_service(d), blob)
+    write_live_cred(d, blob)
     cj = load_claude_json(d) or {}
     cj["oauthAccount"] = snap.get("oauthAccount")
     if snap.get("userID"):
@@ -707,7 +800,7 @@ def refresh_gate(cfg, name, min_days_left, force):
     live_in = [p for p in cfg["profiles"] if current_account_of(cfg, p) == name]
     if live_in and not force:
         return False, None, None, f"{name}: skipped — live in profile \"{live_in[0]}\" (live tokens refresh themselves)"
-    blob = keychain_read(parked_service(name))
+    blob = read_parked_cred(name)
     if blob is None:
         return False, None, None, f"{name}: skipped — no parked credential"
     try:
@@ -754,8 +847,8 @@ def refresh_account(cfg, name, min_days_left, force, quiet):
 
     # write + read-back verify before declaring success — the new refresh
     # token must never exist only in memory
-    keychain_write(parked_service(name), new_blob)
-    if keychain_read(parked_service(name)) != new_blob:
+    write_parked_cred(name, new_blob)
+    if read_parked_cred(name) != new_blob:
         return f"{name}: KEYCHAIN VERIFY FAILED after refresh — run `claude-profile auth {name}`"
     snap = load_snapshot(name) or {}
     snap["lastRefreshedAt"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -991,11 +1084,11 @@ def cmd_status(args):
         for acct in accounts:
             snap = load_snapshot(acct)
             is_live = acct == current
-            parked_blob = keychain_read(parked_service(acct))
+            parked_blob = read_parked_cred(acct)
             # live account's true expiry lives in the live Keychain item (Claude
             # Code refreshes it); parked accounts show their parked pair, which
             # is what the keep-alive daemon renews.
-            blob = keychain_read(live_service(d)) if is_live else parked_blob
+            blob = read_live_cred(d) if is_live else parked_blob
             tag = "ACTIVE " if is_live else ("parked " if parked_blob else "UNSAVED")
             email = (snap or {}).get("oauthAccount", {}) or {}
             email = email.get("emailAddress", "")
@@ -1024,7 +1117,7 @@ def cmd_status(args):
         for name in strays:
             snap = load_snapshot(name) or {}
             email = (snap.get("oauthAccount") or {}).get("emailAddress", "")
-            parked = "parked" if keychain_read(parked_service(name)) is not None else "snapshot-only"
+            parked = "parked" if read_parked_cred(name) is not None else "snapshot-only"
             saved_at = snap.get("savedAt", "")
             print(f"    {name:<10} {parked}  {email}  {saved_at}")
     sys.exit(0)
@@ -1064,7 +1157,7 @@ def cmd_accounts(args):
     listed = profile_accounts(cfg, profile)
     for acct in listed:
         state = "active" if acct == current else (
-            "parked" if keychain_read(parked_service(acct)) is not None else "unsaved"
+            "parked" if read_parked_cred(acct) is not None else "unsaved"
         )
         print(f"{acct}\t{state}\t{profile}")
     configured = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
@@ -1095,14 +1188,14 @@ def cmd_save(args):
     cfg = load_config()
     profile = pick_profile(cfg, args)
     d = profile_dir(cfg, profile)
-    blob = keychain_read(live_service(d))
+    blob = read_live_cred(d)
     if blob is None:
-        die(f"no live credential in Keychain for {d} ({live_service(d)}) — log in with `claude` → /login first")
+        die(f"no live credential for {d} ({live_cred_desc(d)}) — log in with `claude` → /login first")
     cj = load_claude_json(d)
     if not cj or not (cj.get("oauthAccount") or {}).get("accountUuid"):
         die(f"{claude_json_path(d)} has no oauthAccount — log in first")
     with mutation_lock():
-        keychain_write(parked_service(args.name), blob)
+        write_parked_cred(args.name, blob)
         save_snapshot(
             args.name,
             {
@@ -1173,12 +1266,12 @@ def cmd_delete(args):
     name = args.name
     # capture live-ness BEFORE deleting the snapshot (matching needs it)
     live_in = [p for p in cfg["profiles"] if current_account_of(cfg, p) == name]
-    had_parked = keychain_read(parked_service(name)) is not None
+    had_parked = read_parked_cred(name) is not None
     had_snap = load_snapshot(name) is not None
     if not had_parked and not had_snap:
         die(f"account \"{name}\" has nothing saved")
     with mutation_lock():
-        keychain_delete(parked_service(name))
+        delete_parked_cred(name)
         try:
             os.unlink(snapshot_path(name))
         except FileNotFoundError:
@@ -1200,18 +1293,17 @@ def cmd_delete(args):
 def cmd_auth(args):
     """Re-authenticate a (possibly parked) account without touching any live
     profile: run the login flow in a throwaway scratch config dir, harvest the
-    fresh credential from the scratch dir's own Keychain item, park it under
-    the account name, then wipe the scratch dir and its Keychain item."""
+    fresh credential from the scratch dir's own credential store, park it under
+    the account name, then wipe the scratch dir and its credential."""
     import shutil
 
     load_config()  # config must exist/parse, keeps UX consistent
     name = args.name
     scratch = os.path.join(STATE_DIR, "auth-scratch")
-    svc = live_service(scratch)
 
     if not args.no_launch:
         # wipe any previous scratch login so claude forces a fresh /login
-        keychain_delete(svc)
+        delete_live_cred(scratch)
         shutil.rmtree(scratch, ignore_errors=True)
         os.makedirs(scratch, exist_ok=True)
         claude_bin = shutil.which("claude")
@@ -1224,7 +1316,7 @@ def cmd_auth(args):
         subprocess.call([claude_bin], env=dict(os.environ, CLAUDE_CONFIG_DIR=scratch))
         print()
 
-    blob = keychain_read(svc)
+    blob = read_live_cred(scratch)
     try:
         with open(os.path.join(scratch, ".claude.json")) as f:
             cj = json.load(f)
@@ -1249,7 +1341,7 @@ def cmd_auth(args):
         )
 
     with mutation_lock():
-        keychain_write(parked_service(name), blob)
+        write_parked_cred(name, blob)
         save_snapshot(
             name,
             {
@@ -1260,7 +1352,7 @@ def cmd_auth(args):
             },
         )
     # hygiene: no credentials linger outside the parked item
-    keychain_delete(svc)
+    delete_live_cred(scratch)
     shutil.rmtree(scratch, ignore_errors=True)
     print(f"parked fresh credentials for \"{name}\" ({email}).")
 
@@ -1292,7 +1384,7 @@ def cmd_rotate(args):
     for acct in accounts:
         if acct == current:
             continue
-        blob = keychain_read(parked_service(acct))
+        blob = read_parked_cred(acct)
         health = refresh_health(blob) if blob else ""
         if health:
             print(
@@ -1317,7 +1409,7 @@ def cmd_rotate(args):
     target = None
     for i in range(1, len(accounts)):
         cand = accounts[(idx + i) % len(accounts)]
-        if keychain_read(parked_service(cand)) is None:
+        if read_parked_cred(cand) is None:
             continue  # never saved — can't activate
         cand_limits, _ = account_usage(cfg, state, profile, cand)
         if cand_limits is not None and is_exhausted(cand_limits):
