@@ -30,9 +30,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(
@@ -62,7 +59,44 @@ TOKEN_URL = os.environ.get(
 OAUTH_CLIENT_ID = os.environ.get(
     "CLAUDE_PROFILE_CLIENT_ID", "SET-CLAUDE-CODE-OAUTH-CLIENT-ID"
 )
+# Cloudflare in front of the endpoints rejects python-urllib's signature
+# (error 1010), so all HTTP goes through curl with a CLI-shaped User-Agent.
+USER_AGENT = os.environ.get("CLAUDE_PROFILE_UA", "SET-CLAUDE-CODE-USER-AGENT")
 LAUNCHD_LABEL = "com.claude-profile.refresh"
+
+
+def curl_json(url, body=None, bearer=None):
+    """POST (body given) or GET a JSON endpoint via curl. Secrets never enter
+    argv: a POST body travels on stdin, a bearer token travels as a header
+    read from stdin (-H @-). body and bearer are mutually exclusive here.
+    Returns (status:int, data:dict|None, err:str)."""
+    cmd = [
+        "curl", "-sS", "--connect-timeout", "5", "--max-time", "15",
+        "-H", f"User-Agent: {USER_AGENT}",
+        "-H", "Accept: application/json",
+        "-H", "anthropic-beta: oauth-2025-04-20",
+        "-w", "\n%{http_code}",
+        url,
+    ]
+    inp = None
+    if body is not None:
+        inp = json.dumps(body)
+        cmd += ["-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-"]
+    elif bearer:
+        inp = f"Authorization: Bearer {bearer}"
+        cmd += ["-H", "@-"]
+    res = subprocess.run(cmd, input=inp, capture_output=True, text=True)
+    if res.returncode != 0:
+        return 0, None, (res.stderr.strip().splitlines() or ["curl failed"])[-1][:200]
+    raw, _, code = res.stdout.rpartition("\n")
+    if not code.strip().isdigit():
+        return 0, None, "no HTTP status from curl"
+    status = int(code)
+    try:
+        data = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        data = None
+    return status, data, raw[:200]
 
 # Flat (non-account-keyed) caches in .claude.json that hold single-account
 # values; cleared on swap so they regenerate for the incoming account.
@@ -361,20 +395,8 @@ def live_sessions(d):
 # ── usage / exhaustion ──────────────────────────────────────────────────────
 
 def fetch_usage(token):
-    req = urllib.request.Request(
-        USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.load(r)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
-        return None
-    if not isinstance(data, dict) or data.get("error"):
+    status, data, _ = curl_json(USAGE_URL, bearer=token)
+    if status != 200 or not isinstance(data, dict) or data.get("error"):
         return None
     return data
 
@@ -560,43 +582,19 @@ def activate_account(cfg, state, profile, target):
 def oauth_refresh_grant(refresh_token):
     """Perform the OAuth refresh grant Claude Code itself uses. Returns the
     parsed response dict, or raises RuntimeError with a terse reason."""
-    payload = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": OAUTH_CLIENT_ID,
-    }
-    attempts = [
-        ("application/json", json.dumps(payload).encode()),
-        (
-            "application/x-www-form-urlencoded",
-            urllib.parse.urlencode(payload).encode(),
-        ),
-    ]
-    last = None
-    for ctype, body in attempts:
-        req = urllib.request.Request(
-            TOKEN_URL, data=body, headers={"Content-Type": ctype}, method="POST"
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                data = json.load(r)
-            if data.get("access_token"):
-                return data
-            last = f"no access_token in response ({list(data)[:5]})"
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}"
-            if e.code in (400, 401, 403):
-                try:
-                    last += f" {e.read(200).decode(errors='replace')}"
-                except OSError:
-                    pass
-                # 4xx on JSON → try form encoding once; 4xx on both → give up
-                continue
-            break
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-            last = str(e)
-            break
-    raise RuntimeError(last or "unknown error")
+    status, data, err = curl_json(
+        TOKEN_URL,
+        body={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        },
+    )
+    if status == 200 and isinstance(data, dict) and data.get("access_token"):
+        return data
+    if status == 200:
+        raise RuntimeError(f"no access_token in response ({list(data or {})[:5]})")
+    raise RuntimeError(f"HTTP {status} {err}".strip())
 
 
 def refresh_account(cfg, name, min_days_left, force, quiet):
@@ -650,7 +648,12 @@ def refresh_account(cfg, name, min_days_left, force, quiet):
     snap["lastRefreshedAt"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     save_snapshot(name, snap)
     nexp = new_oauth.get("refreshTokenExpiresAt")
-    horizon = f", next expiry {fmt_reset(datetime.datetime.fromtimestamp(nexp/1000).astimezone().isoformat())}" if nexp else ""
+    if nexp:
+        dt = datetime.datetime.fromtimestamp(nexp / 1000).astimezone()
+        days = (nexp / 1000 - time.time()) / 86400
+        horizon = f", refresh token good until {dt.strftime('%Y-%m-%d')} ({days:.0f}d)"
+    else:
+        horizon = ""
     return f"{name}: refreshed{horizon}"
 
 
