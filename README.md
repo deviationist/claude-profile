@@ -107,6 +107,8 @@ claude-profile delete [<name>]     delete an account's parked credential +
 claude-profile rotate [--dry-run]  switch to the next non-exhausted account
 claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
+claude-profile refresh [<name>]    keep-alive: renew aging parked refresh tokens
+claude-profile daemon install|uninstall|status   daily launchd keep-alive
 claude-with <profile> [args]       one-shot launch against a profile
 claude-switch [<name>]             alias for `claude-profile use`
 claude-default                     one-shot launch with CLAUDE_CONFIG_DIR unset
@@ -128,9 +130,27 @@ after), or let auto mode handle it.
 
 ### Re-authenticating a parked account
 
-A parked account's refresh token can eventually expire (`status` warns with
-`⚠ refresh expires in Nd` / `refresh EXPIRED`). Fixing it does **not**
-require swapping it live:
+Access tokens are short-lived and refresh silently; the clock that matters
+is the **refresh token** (~weeks). Every swap off an account re-parks its
+freshest pair, so regular rotation keeps parked accounts alive by itself —
+only an account left untouched for weeks can age out.
+
+Two lines of defence when one does age:
+
+**1. Keep-alive (`refresh` + daemon).** `claude-profile refresh` performs
+the same OAuth refresh grant Claude Code uses (endpoint + public client id
+as shipped in the binary) on parked accounts whose refresh token has fewer
+than 14 days left (`--min-days-left`), and re-parks the new pair. Safety
+ordering: live accounts are never touched (their tokens refresh
+themselves), the new pair is written **and read back** from the Keychain
+before success is declared, and a mutation lock serializes it against
+manual swaps. `claude-profile daemon install` registers a launchd agent
+running it daily (`daemon status` / `daemon uninstall` to inspect/remove).
+
+**2. Warnings + painless re-auth.** If a token still ages out (machine off
+for weeks, revocation), you're warned in `status` **and at every `claude`
+launch** of an auto profile (`⚠ refresh expires in Nd` / `refresh
+EXPIRED`). Fixing it does **not** require swapping the account live:
 
 ```sh
 claude-profile auth max5x
