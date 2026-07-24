@@ -231,12 +231,21 @@ def resolve_profile(cfg, state, pwd):
 # ── Keychain (macOS `security`) ─────────────────────────────────────────────
 
 def _security(args, input_str=None, check=False):
-    res = subprocess.run(
-        ["security"] + args,
-        input=input_str,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        res = subprocess.run(
+            ["security"] + args,
+            input=input_str,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # No macOS `security` binary (e.g. Linux). Keychain-backed features
+        # (save/auth/refresh/parked-account listing) are macOS-only; degrade to
+        # a clean miss so read paths (status, resolve) keep working instead of
+        # crashing. Write paths pass check=True and surface a clear error.
+        if check:
+            raise RuntimeError("`security` not found — Keychain features are macOS-only")
+        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="security: not found")
     if check and res.returncode != 0:
         raise RuntimeError(f"security {args[0]} failed: {res.stderr.strip()}")
     return res
