@@ -107,8 +107,8 @@ claude-profile delete [<name>]     delete an account's parked credential +
 claude-profile rotate [--dry-run]  switch to the next non-exhausted account
 claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
-claude-profile refresh [<name>]    keep-alive: renew aging parked refresh tokens
-claude-profile daemon install|uninstall|status   daily launchd keep-alive
+claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
+claude-profile daemon install [--jitter N]|uninstall|status   launchd keep-alive
 claude-with <profile> [args]       one-shot launch against a profile
 claude-switch [<name>]             alias for `claude-profile use`
 claude-default                     one-shot launch with CLAUDE_CONFIG_DIR unset
@@ -146,6 +146,14 @@ themselves), the new pair is written **and read back** from the Keychain
 before success is declared, and a mutation lock serializes it against
 manual swaps. `claude-profile daemon install` registers a launchd agent
 running it daily (`daemon status` / `daemon uninstall` to inspect/remove).
+
+The daemon fires at a fixed time (12:17) + login, but only ~once per
+14-day window does it actually make a network call. To keep that call off a
+predictable wall-clock beat, `refresh --jitter SECONDS` sleeps a random
+`0..SECONDS` **only when a grant is due** (no-op runs stay instant, before
+the lock so a concurrent swap isn't blocked). `daemon install [--jitter N]`
+bakes this into the plist (default `3600` = grants land anywhere in a 1h
+window; `--jitter 0` to disable).
 
 **2. Warnings + painless re-auth.** If a token still ages out (machine off
 for weeks, revocation), you're warned in `status` **and at every `claude`

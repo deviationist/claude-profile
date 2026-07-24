@@ -26,6 +26,7 @@ import argparse
 import datetime
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -597,28 +598,41 @@ def oauth_refresh_grant(refresh_token):
     raise RuntimeError(f"HTTP {status} {err}".strip())
 
 
-def refresh_account(cfg, name, min_days_left, force, quiet):
-    """Refresh a parked account's token pair in place. Returns a short result
-    string (also printed unless quiet suppresses the boring ones)."""
+def refresh_gate(cfg, name, min_days_left, force):
+    """Decide whether a parked account needs a network refresh grant. Pure /
+    read-only (Keychain read only, no network). Returns
+    (act: bool, blob: str|None, oauth: dict|None, reason: str|None):
+    act=True → a grant should run (reason is None); act=False → reason is the
+    human 'skipped/fresh/EXPIRED' line. Single source of truth for both the
+    real refresh and the jitter 'is anything due?' pre-check."""
     live_in = [p for p in cfg["profiles"] if current_account_of(cfg, p) == name]
     if live_in and not force:
-        return f"{name}: skipped — live in profile \"{live_in[0]}\" (live tokens refresh themselves)"
+        return False, None, None, f"{name}: skipped — live in profile \"{live_in[0]}\" (live tokens refresh themselves)"
     blob = keychain_read(parked_service(name))
     if blob is None:
-        return f"{name}: skipped — no parked credential"
+        return False, None, None, f"{name}: skipped — no parked credential"
     try:
         oauth = json.loads(blob).get("claudeAiOauth") or {}
     except json.JSONDecodeError:
-        return f"{name}: skipped — unparsable parked blob"
-    rt = oauth.get("refreshToken")
-    if not rt:
-        return f"{name}: skipped — parked blob has no refresh token"
+        return False, None, None, f"{name}: skipped — unparsable parked blob"
+    if not oauth.get("refreshToken"):
+        return False, blob, oauth, f"{name}: skipped — parked blob has no refresh token"
     rexp = oauth.get("refreshTokenExpiresAt")
     if rexp and rexp / 1000 <= time.time():
-        return f"{name}: refresh token already EXPIRED — run `claude-profile auth {name}`"
+        return False, blob, oauth, f"{name}: refresh token already EXPIRED — run `claude-profile auth {name}`"
     if not force and rexp and (rexp / 1000 - time.time()) > min_days_left * 86400:
         days = (rexp / 1000 - time.time()) / 86400
-        return f"{name}: fresh ({days:.0f}d left) — nothing to do"
+        return False, blob, oauth, f"{name}: fresh ({days:.0f}d left) — nothing to do"
+    return True, blob, oauth, None
+
+
+def refresh_account(cfg, name, min_days_left, force, quiet):
+    """Refresh a parked account's token pair in place. Returns a short result
+    string (also printed unless quiet suppresses the boring ones)."""
+    act, blob, oauth, reason = refresh_gate(cfg, name, min_days_left, force)
+    if not act:
+        return reason
+    rt = oauth.get("refreshToken")
 
     try:
         resp = oauth_refresh_grant(rt)
@@ -663,6 +677,19 @@ def cmd_refresh(args):
         names = [args.name]
     else:
         names = sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])})
+
+    # Timing jitter: if (and only if) a grant is actually due, sleep a random
+    # 0..jitter seconds first, so the daemon's request never lands at a fixed
+    # wall-clock time. No-op runs (nothing due) skip the sleep, staying instant.
+    # Slept BEFORE the mutation lock so a concurrent manual swap isn't blocked;
+    # refresh_account re-runs the gate under the lock, so this is TOCTOU-safe.
+    jitter = getattr(args, "jitter", 0) or 0
+    if jitter > 0 and any(refresh_gate(cfg, n, args.min_days_left, args.force)[0] for n in names):
+        delay = random.uniform(0, jitter)
+        stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        print(f"[{stamp}] jitter: sleeping {delay:.0f}s before grant", file=sys.stderr)
+        time.sleep(delay)
+
     results = []
     with mutation_lock():
         for name in names:
@@ -700,6 +727,8 @@ def cmd_daemon(args):
         <string>{script}</string>
         <string>refresh</string>
         <string>--quiet</string>
+        <string>--jitter</string>
+        <string>{int(args.jitter)}</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>17</integer></dict>
@@ -719,7 +748,10 @@ def cmd_daemon(args):
         )
         if res.returncode != 0:
             die(f"launchctl bootstrap failed: {res.stderr.strip()}")
-        print(f"daemon installed: daily refresh at 12:17 (+ on load) — log: {log}")
+        print(
+            f"daemon installed: daily refresh at 12:17 (+ on load), "
+            f"up to {int(args.jitter)}s jitter before a due grant — log: {log}"
+        )
     elif args.action == "uninstall":
         subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True
@@ -1240,10 +1272,24 @@ def main():
     )
     p.add_argument("--force", action="store_true", help="refresh even if fresh or live (unsafe when live)")
     p.add_argument("--quiet", action="store_true", help="suppress nothing-to-do lines (daemon mode)")
+    p.add_argument(
+        "--jitter",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="when a grant is due, first sleep a random 0..SECONDS to decorrelate timing (default 0)",
+    )
     p.set_defaults(func=cmd_refresh)
 
     p = sub.add_parser("daemon", help="manage the launchd keep-alive daemon")
     p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.add_argument(
+        "--jitter",
+        type=float,
+        default=3600,
+        metavar="SECONDS",
+        help="install: max random pre-grant delay baked into the plist (default 3600 = 1h)",
+    )
     p.set_defaults(func=cmd_daemon)
 
     p = sub.add_parser("auto", help="toggle auto-rotation for a profile")
