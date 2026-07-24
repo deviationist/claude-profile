@@ -218,13 +218,19 @@ EXPIRED`). Fixing it does **not** require swapping the account live:
 claude-profile auth max5x
 ```
 
-This launches Claude Code in a **throwaway scratch config dir** (under the
-state dir), where you complete a normal login for that account and quit.
-The fresh credential is harvested from the scratch dir's own Keychain item,
-parked under the account name, and the scratch dir + its Keychain item are
-wiped. Your live profile is never touched. A login that doesn't match the
-account's recorded identity is rejected (`--force` overrides;
-`--no-launch` re-harvests the kept scratch login after a mismatch).
+This runs `claude auth login` against a **throwaway scratch config dir** (under
+the state dir) — the focused sign-in, **not** the first-run TUI: it prints an
+auth URL and takes a **pasted code**, so it works headless / over SSH with no
+localhost callback to forward. Open the URL signed into the right account, paste
+the code back, done. The fresh credential is harvested from the scratch dir,
+parked under the account name, and the scratch dir + its credential are wiped —
+your live profile is never touched.
+
+The account's recorded email is pre-filled on the sign-in page; override with
+`--email <addr>` (needed on the *first* save of a new account). A login that
+doesn't match the account's recorded identity is rejected (`--force` overrides;
+`--no-launch` re-harvests a kept scratch login). If the focused sign-in ever
+misbehaves, `--tui` falls back to the full interactive client.
 
 ## How serial switching works
 

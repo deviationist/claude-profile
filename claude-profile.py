@@ -1478,18 +1478,31 @@ def cmd_auth(args):
     scratch = os.path.join(STATE_DIR, "auth-scratch")
 
     if not args.no_launch:
-        # wipe any previous scratch login so claude forces a fresh /login
+        # wipe any previous scratch login so a fresh sign-in is forced
         delete_live_cred(scratch)
         shutil.rmtree(scratch, ignore_errors=True)
         os.makedirs(scratch, exist_ok=True)
         claude_bin = shutil.which("claude")
         if not claude_bin:
             die("`claude` binary not found in PATH")
-        print(f"Capturing fresh credentials for \"{name}\" via a throwaway config dir.")
-        print(f"  1. complete the login — the browser must be signed into the {name} account")
-        print("  2. once logged in, just QUIT claude (Ctrl+C twice)")
+        # `claude auth login` = focused sign-in with no first-run TUI: it prints
+        # an auth URL and takes a pasted code, so it works headless / over SSH
+        # (no localhost callback to forward). --tui falls back to the full client.
+        known_email = args.email or (load_snapshot(name) or {}).get("oauthAccount", {}).get("emailAddress")
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=scratch)
+        print(
+            f"Capturing fresh credentials for \"{name}\" — sign in as "
+            f"{known_email or 'the ' + name + ' account'}, then paste the code when prompted."
+        )
         print()
-        subprocess.call([claude_bin], env=dict(os.environ, CLAUDE_CONFIG_DIR=scratch))
+        if args.tui:
+            print("  (--tui: complete the login in the client, then quit it with Ctrl+C twice)")
+            subprocess.call([claude_bin], env=env)
+        else:
+            cmd = [claude_bin, "auth", "login", "--claudeai"]
+            if known_email:
+                cmd += ["--email", known_email]
+            subprocess.call(cmd, env=env)
         print()
 
     blob = read_live_cred(scratch)
@@ -1500,7 +1513,10 @@ def cmd_auth(args):
         cj = {}
     oauth_acct = cj.get("oauthAccount") or {}
     if blob is None or not oauth_acct.get("accountUuid"):
-        die("no login captured in the scratch dir — nothing changed")
+        die(
+            "no login captured in the scratch dir — nothing changed "
+            "(if the sign-in completed, retry with `--tui` for the full-client flow)"
+        )
 
     email = oauth_acct.get("emailAddress", "?")
     prev = load_snapshot(name)
@@ -1722,6 +1738,8 @@ def main():
     )
     p.add_argument("name")
     p.add_argument("--force", action="store_true", help="accept a login that mismatches the recorded account")
+    p.add_argument("--email", help="pre-fill this email on the sign-in page (default: the account's recorded email)")
+    p.add_argument("--tui", action="store_true", help="use the full interactive client instead of `claude auth login`")
     p.add_argument(
         "--no-launch",
         action="store_true",

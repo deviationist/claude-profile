@@ -27,9 +27,12 @@ python3 stdlib):
   SIGTERM/SIGKILL them first then swap — `ensure_swappable()`),
   `toggle` (switch to the NEXT account in the profile list, cyclic — flips
   between two; same `--force`), `save <name>` (park current login as a named account —
-  bootstrap), `auth <name>` (re-authenticate via a throwaway scratch
-  config dir — harvest login → park → wipe scratch; live profiles
-  untouched; rejects a mismatched login), `delete <name>` (remove an
+  bootstrap), `auth <name> [--email E] [--tui]` (re-authenticate via a
+  throwaway scratch dir; drives `claude auth login --claudeai` = focused
+  URL+paste-code sign-in, no first-run TUI, headless/SSH-friendly with no
+  localhost callback; `--email` prefills, `--tui` falls back to the full
+  client → harvest login → park → wipe scratch; live profiles untouched;
+  rejects a mismatched login), `delete <name>` (remove an
   account's parked credential + snapshot — reverts save/auth),
   `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`.
   Per-profile **`exhaust_credits`** (config, default false): when true, a
