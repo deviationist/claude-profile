@@ -57,6 +57,38 @@ guard + `--force` kill, `oauth_setting` resolution, `claude_json_path`,
   `accountUuid`) and the swap-time `claude-usage --fresh` trigger in the
   `claude-profile` wrapper.
 
+## Parked accounts' 5-hour windows go unkept
+
+Keep-alive renews parked accounts' **refresh tokens**, but nothing keeps their
+**5-hour usage windows** open. Only the live account's window gets anchored, by
+whatever runs against the profile dir — e.g.
+[claude-auto-window](https://github.com/deviationist/claude-auto-window), whose
+profile model is one config dir ⇒ one account, so parked accounts are invisible
+to it. Net effect: swap to a parked account after a quiet stretch and you land on
+a closed window, having forfeited hours of allowance you were entitled to. The
+serial model is what creates the gap — the two tools are each correct alone.
+
+No swap is needed to fix it: a window is a property of the **account**, not the
+config dir, and `account_usage()` already proves a parked credential works
+headlessly. Sketch of a `keepwindow <account>` subcommand:
+
+1. take `mutation_lock()`
+2. materialize the parked blob into a scratch config dir — the parked file is
+   already byte-compatible with `.credentials.json`
+3. run the window-opener against it (`claude-auto-window --run --config-dir
+   <scratch>`). Reuse it rather than reimplementing the starter: opening a window
+   requires a **real interactive session**, `claude -p` does not open one
+4. **re-park the rotated credential**, then remove the scratch dir
+
+Step 4 is load-bearing. `refresh_account()` shows the refresh token rotates on
+use, so a real launch against the scratch dir rotates the pair — skip the
+write-back and the parked copy is dead, and the next `account` swap installs a
+stale token. `claude-profile` must remain the single writer.
+
+Open questions: driven by its own timer or by the opener's daemon loop; whether
+to consult a balance gate per account before spending; whether `rotate`/`auto`
+should factor "window currently open" into the target it picks.
+
 ## Done
 
 - **Linux credential backend** — serial accounts / keep-alive work on Linux
