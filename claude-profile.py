@@ -863,6 +863,38 @@ def refresh_account(cfg, name, min_days_left, force, quiet):
     return f"{name}: refreshed{horizon}"
 
 
+def notify_failure(cfg, fails):
+    """Best-effort email on keep-alive failure via the system mailer. Opt-in:
+    fires only when `notify_email` is set (config, or $CLAUDE_PROFILE_NOTIFY_EMAIL)
+    and a `sendmail` exists (e.g. the homelab's msmtp-mta). Never raises."""
+    to = os.environ.get("CLAUDE_PROFILE_NOTIFY_EMAIL") or (cfg or {}).get("notify_email")
+    if not to or not fails:
+        return
+    import shutil
+    import socket
+
+    sendmail = shutil.which("sendmail") or (
+        "/usr/sbin/sendmail" if os.path.exists("/usr/sbin/sendmail") else None
+    )
+    if not sendmail:
+        print("notify_email is set but no `sendmail` was found — skipping email", file=sys.stderr)
+        return
+    host = socket.gethostname()
+    body = (
+        f"claude-profile keep-alive refresh failed on {host}:\n\n"
+        + "\n".join(f"  - {r}" for r in fails)
+        + "\n\nFix: run `claude-profile status`, then `claude-profile auth <name>`.\n"
+    )
+    msg = f"To: {to}\nSubject: [claude-profile] keep-alive failed on {host}\n\n{body}"
+    try:
+        subprocess.run(
+            [sendmail, "-t"], input=msg, text=True, timeout=30,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def cmd_refresh(args):
     cfg = load_config()
     pre = []
@@ -896,7 +928,9 @@ def cmd_refresh(args):
         boring = ": fresh (" in r or ": skipped — live in" in r or ": skipped — keep-alive" in r
         if not (args.quiet and boring):
             print(f"[{stamp}] {r}")
-    if any("FAILED" in r or "EXPIRED" in r for r in results):
+    fails = [r for r in results if "FAILED" in r or "EXPIRED" in r]
+    if fails:
+        notify_failure(cfg, fails)
         sys.exit(1)
 
 
