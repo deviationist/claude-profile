@@ -44,8 +44,15 @@ wire CI.
   `accountUuid`) and the swap-time `claude-usage --fresh` trigger in the
   `claude-profile` wrapper.
 
+## Done
+
+- **Linux credential backend** — serial accounts / keep-alive work on Linux
+  (live = `<dir>/.credentials.json`, parked = 0600 files under the state dir),
+  dispatched by `IS_MACOS`. Add Linux tests to the suite above.
+- **Linux keep-alive daemon** — systemd `--user` timer (+ linger) alongside the
+  macOS launchd agent.
+
 ## Other
 
-- Linux credential store (`<dir>/.credentials.json`) support for the
-  account / refresh features (currently macOS-Keychain-only; on Linux the tool
-  runs as a single-identity passthrough).
+- Extend the test suite to cover the Linux backend (file store, systemd daemon
+  unit generation) — not just the macOS Keychain path.

@@ -906,7 +906,7 @@ def launchd_plist_path():
     return os.path.join(HOME, "Library", "LaunchAgents", f"{LAUNCHD_LABEL}.plist")
 
 
-def cmd_daemon(args):
+def _daemon_launchd(args):
     plist = launchd_plist_path()
     uid = os.getuid()
     if args.action == "install":
@@ -972,6 +972,107 @@ def cmd_daemon(args):
             print("recent log:")
             for line in tail:
                 print(f"  {line.rstrip()}")
+
+
+SYSTEMD_UNIT = "claude-profile-refresh"
+
+
+def _sctl(*a):
+    """systemctl --user with XDG_RUNTIME_DIR filled in (SSH sessions lack it)."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return subprocess.run(["systemctl", "--user", *a], capture_output=True, text=True, env=env)
+
+
+def _daemon_systemd(args):
+    import getpass
+
+    unit_dir = os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "systemd", "user"
+    )
+    svc = os.path.join(unit_dir, f"{SYSTEMD_UNIT}.service")
+    timer = os.path.join(unit_dir, f"{SYSTEMD_UNIT}.timer")
+    log = os.path.join(STATE_DIR, "refresh.log")
+    user = getpass.getuser()
+
+    if args.action == "install":
+        os.makedirs(unit_dir, exist_ok=True)
+        os.makedirs(STATE_DIR, exist_ok=True)
+        script = os.path.abspath(__file__)
+        atomic_write(svc, f"""[Unit]
+Description=claude-profile keep-alive (renew parked account refresh tokens)
+
+[Service]
+Type=oneshot
+ExecStart={sys.executable} {script} refresh --quiet --jitter {int(args.jitter)}
+StandardOutput=append:{log}
+StandardError=append:{log}
+""")
+        atomic_write(timer, f"""[Unit]
+Description=claude-profile keep-alive timer
+
+[Timer]
+OnCalendar=*-*-* 12:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+""")
+        # Linger first, so the user manager runs (and keeps the timer firing
+        # while logged out — the point of it on a server).
+        linger = subprocess.run(["loginctl", "enable-linger", user], capture_output=True, text=True)
+        if linger.returncode != 0:
+            linger = subprocess.run(
+                ["sudo", "-n", "loginctl", "enable-linger", user], capture_output=True, text=True
+            )
+        _sctl("daemon-reload")
+        res = _sctl("enable", "--now", f"{SYSTEMD_UNIT}.timer")
+        if res.returncode != 0:
+            die(
+                f"systemctl --user enable failed: {(res.stderr or res.stdout).strip()} "
+                f"(a bus error? run `claude-profile daemon install` from an interactive login)"
+            )
+        print(
+            f"daemon installed: systemd --user timer '{SYSTEMD_UNIT}.timer', daily 12:17 "
+            f"(Persistent catch-up), up to {int(args.jitter)}s jitter — log: {log}"
+        )
+        if linger.returncode != 0:
+            print(
+                f"  ⚠ could not enable linger — run `sudo loginctl enable-linger {user}` so the "
+                f"timer fires while you're logged out",
+                file=sys.stderr,
+            )
+    elif args.action == "uninstall":
+        _sctl("disable", "--now", f"{SYSTEMD_UNIT}.timer")
+        for f in (timer, svc):
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
+        _sctl("daemon-reload")
+        print("daemon uninstalled")
+    else:  # status
+        print(f"unit: {timer} ({'present' if os.path.exists(timer) else 'absent'})")
+        active = _sctl("is-active", f"{SYSTEMD_UNIT}.timer").stdout.strip() or "inactive"
+        enabled = _sctl("is-enabled", f"{SYSTEMD_UNIT}.timer").stdout.strip() or "disabled"
+        print(f"systemd --user timer: {active} / {enabled}")
+        for line in _sctl("list-timers", "--all", f"{SYSTEMD_UNIT}.timer").stdout.splitlines():
+            if SYSTEMD_UNIT in line:
+                print(f"  next: {line.strip()}")
+        linger = subprocess.run(
+            ["loginctl", "show-user", user, "-p", "Linger"], capture_output=True, text=True
+        ).stdout.strip()
+        print(f"  {linger or 'Linger=?'}")
+        if os.path.exists(log):
+            with open(log) as f:
+                tail = f.readlines()[-6:]
+            print("recent log:")
+            for line in tail:
+                print(f"  {line.rstrip()}")
+
+
+def cmd_daemon(args):
+    (_daemon_launchd if IS_MACOS else _daemon_systemd)(args)
 
 
 # ── commands ────────────────────────────────────────────────────────────────
