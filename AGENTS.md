@@ -35,10 +35,11 @@ python3 stdlib):
   `claude` launch of an auto profile — and lists saved-but-unconfigured
   accounts so strays are visible. Keep-alive: `refresh [<name>]
   [--min-days-left N] [--force] [--jitter SECONDS]` runs the OAuth refresh
-  grant (endpoint `SET-CLAUDE-CODE-TOKEN-URL` + public client id,
-  both verified against the shipped binary; transport is curl w/ a CLI UA —
-  urllib is CF-1010-blocked) on parked, non-live accounts and re-parks the
-  new pair (write + read-back verify; mutation lock vs manual swaps; live
+  grant (Claude Code's OAuth client id + endpoints + User-Agent, supplied
+  per machine via the config `oauth` block / `CLAUDE_PROFILE_*` env — never
+  committed, see `oauth_setting()`; transport is curl w/ the configured UA,
+  since urllib is CF-1010-blocked) on parked, non-live accounts and re-parks
+  the new pair (write + read-back verify; mutation lock vs manual swaps; live
   accounts never touched). `refresh_gate()` is the single source of truth
   for "is a grant due?" — shared by the real refresh and the `--jitter`
   pre-check, which sleeps a random `0..SECONDS` (pre-lock) only when a grant

@@ -49,6 +49,12 @@ edit this by hand; the CLI reads it:
       "accounts": ["max20x", "max5x"],  // credential slots (order = rotation order)
       "auto": true                  // rotate off an exhausted account at launch
     }
+  },
+  "oauth": {                        // OPTIONAL — only for refresh/usage; see "OAuth constants"
+    "client_id":  "<claude-code-oauth-client-id>",
+    "token_url":  "<claude-code-token-endpoint-url>",
+    "usage_url":  "<claude-code-usage-endpoint-url>",
+    "user_agent": "<claude-code-user-agent>"
   }
 }
 ```
@@ -75,6 +81,21 @@ Runtime state (active toggle, live account per profile, usage cache,
 non-secret account metadata) lives in `~/.local/state/claude-profile/`
 (`$XDG_STATE_HOME` respected). **Credentials are never written to disk** —
 parked accounts are Keychain items (`claude-profile-parked-<name>`).
+
+### OAuth constants
+
+The keep-alive `refresh` and per-account `usage` features talk to Claude
+Code's OAuth endpoints, which require Claude Code's own OAuth **client id**,
+token/usage **URLs**, and **User-Agent**. Those identify the official client
+rather than this tool, so they are **not distributed here** — supply them per
+machine in the `oauth` block above (or via the `CLAUDE_PROFILE_CLIENT_ID`,
+`CLAUDE_PROFILE_TOKEN_URL`, `CLAUDE_PROFILE_USAGE_URL`, `CLAUDE_PROFILE_UA`
+environment variables, which take precedence). Read the values from your own
+Claude Code installation.
+
+Everything else works without them: profile routing and account swapping are
+fully functional; only `refresh`, `usage`, and exhaustion-based auto-rotation
+go inert, and they fail with a clear message rather than silently.
 
 ## Use
 
