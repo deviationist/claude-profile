@@ -23,8 +23,10 @@ python3 stdlib):
   (knobs in `./.env`). Bypass: `\claude`.
 - **`claude-profile`** — status (default), `use <name>|default` (persistent
   profile toggle, fzf picker w/o name), `account <name>` (serial credential
-  swap, fzf picker w/o name; refuses under live sessions, `--force`
-  exists), `save <name>` (park current login as a named account —
+  swap, fzf picker w/o name; refuses under live sessions, `--force` =
+  SIGTERM/SIGKILL them first then swap — `ensure_swappable()`),
+  `toggle` (switch to the NEXT account in the profile list, cyclic — flips
+  between two; same `--force`), `save <name>` (park current login as a named account —
   bootstrap), `auth <name>` (re-authenticate via a throwaway scratch
   config dir — harvest login → park → wipe scratch; live profiles
   untouched; rejects a mismatched login), `delete <name>` (remove an
