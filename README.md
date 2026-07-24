@@ -292,6 +292,22 @@ rotate the moment the rate limit hits, spending no credits.
   format, `.claude.json` fields, and the OAuth usage endpoint. Pinned
   behaviors are documented in the source; breakage is benign (see above).
 
+## Tests
+
+Pure-stdlib `unittest`, no network and no real Keychain (both stubbed), so it
+runs the same on macOS, Linux, and CI. The Linux file backend is exercised
+directly (`IS_MACOS` forced false).
+
+```sh
+python3 test/test_claude_profile.py       # or: python3 -m unittest discover -s test
+```
+
+CI runs it on every push/PR (`.github/workflows/test.yml`). Covers the credential
+store (file backend, 0600, round-trips, listing), the refresh gate, exhaustion +
+`exhaust_credits` rotation, `toggle` selection, the live-session guard/`--force`,
+OAuth-constant resolution, path resolution, and the Linux `security`-absent
+degrade.
+
 ## License
 
 MIT
