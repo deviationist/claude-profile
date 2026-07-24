@@ -95,12 +95,15 @@ transparent passthrough everywhere). `\claude` bypasses it entirely.
 
 ```
 claude-profile                     status: profiles, accounts, usage, toggles
+                                   (also lists saved-but-unconfigured accounts)
 claude-profile status --usage      …with fresh usage from the API
 claude-profile use [<name>|default]   toggle the active profile (fzf picker w/o name)
 claude-profile account [<name>]    swap the live account (serial; fzf picker w/o name)
 claude-profile save <name>         park the dir's current login as account <name>
 claude-profile auth [<name>]       re-authenticate an account via a throwaway
                                    config dir — live profiles untouched
+claude-profile delete [<name>]     delete an account's parked credential +
+                                   snapshot (reverts save/auth; live untouched)
 claude-profile rotate [--dry-run]  switch to the next non-exhausted account
 claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
