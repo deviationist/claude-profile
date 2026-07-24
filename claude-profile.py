@@ -840,6 +840,45 @@ def fmt_limits(limits):
     return " · ".join(parts)
 
 
+def _rel_short(ms):
+    """ms-epoch → short horizon from now: 'expired', '5m', '7h', '28d'."""
+    if not ms:
+        return "?"
+    secs = ms / 1000 - time.time()
+    if secs <= 0:
+        return "expired"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h"
+    return f"{int(secs // 86400)}d"
+
+
+def token_horizon(blob, snap):
+    """Compact per-account token insight: access-token life, refresh-token life
+    + absolute expiry date, and when the pair was last saved/rotated. '' if no
+    readable blob."""
+    try:
+        o = (json.loads(blob).get("claudeAiOauth") or {}) if blob else {}
+    except json.JSONDecodeError:
+        o = {}
+    if not o:
+        return ""
+    parts = [f"access {_rel_short(o.get('expiresAt'))}"]
+    rexp = o.get("refreshTokenExpiresAt")
+    if rexp:
+        day = datetime.datetime.fromtimestamp(rexp / 1000).astimezone().strftime("%Y-%m-%d")
+        parts.append(f"refresh {_rel_short(rexp)} (→ {day})")
+    else:
+        parts.append("refresh ?")
+    snap = snap or {}
+    when = snap.get("lastRefreshedAt")
+    label, when = ("rotated", when) if when else ("saved", snap.get("savedAt"))
+    if when:
+        parts.append(f"{label} {str(when)[:10]}")
+    return "token: " + " · ".join(parts)
+
+
 def cmd_status(args):
     cfg = load_config()
     state = load_state()
@@ -870,8 +909,13 @@ def cmd_status(args):
             print(f"    live sessions: {len(sessions)} (account swap blocked)")
         for acct in accounts:
             snap = load_snapshot(acct)
+            is_live = acct == current
             parked_blob = keychain_read(parked_service(acct))
-            tag = "ACTIVE " if acct == current else ("parked " if parked_blob else "UNSAVED")
+            # live account's true expiry lives in the live Keychain item (Claude
+            # Code refreshes it); parked accounts show their parked pair, which
+            # is what the keep-alive daemon renews.
+            blob = keychain_read(live_service(d)) if is_live else parked_blob
+            tag = "ACTIVE " if is_live else ("parked " if parked_blob else "UNSAVED")
             email = (snap or {}).get("oauthAccount", {}) or {}
             email = email.get("emailAddress", "")
             if args.usage:
@@ -880,10 +924,13 @@ def cmd_status(args):
             else:
                 cache = (state.get("usage") or {}).get(acct)
                 usage = "  " + fmt_limits(cache.get("limits")) if cache else ""
-            health = refresh_health(parked_blob) if (parked_blob and acct != current) else ""
+            health = refresh_health(parked_blob) if (parked_blob and not is_live) else ""
             if health:
                 usage += f"  ⚠ {health} → claude-profile auth {acct}"
-            print(f"    {'▸' if acct == current else ' '} {acct:<10} {tag} {email}{usage}")
+            print(f"    {'▸' if is_live else ' '} {acct:<10} {tag} {email}{usage}")
+            th = token_horizon(blob, snap)
+            if th:
+                print(f"        {th}")
         if accounts and current is None:
             print("      (live account unrecognized — run `claude-profile save <name>`)")
     configured = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
