@@ -64,7 +64,8 @@ edit this by hand; the CLI reads it:
   },
   "keepalive": {                    // OPTIONAL — per-account; omitted account = kept alive (true)
     "max5x": false                  // don't auto-renew this account's refresh token
-  }
+  },
+  "notify_email": "you@example.com" // OPTIONAL — email via the system `sendmail` if keep-alive fails
 }
 ```
 
@@ -143,7 +144,7 @@ claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
 claude-profile keepalive [<account>] [on|off]  per-account keep-alive toggle (no args = report)
 claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
-claude-profile daemon install [--jitter N]|uninstall|status   launchd keep-alive
+claude-profile daemon install [--jitter N]|uninstall|status   keep-alive daemon (launchd/systemd)
 claude-with <profile> [args]       one-shot launch against a profile
 claude-switch [<name>]             alias for `claude-profile use`
 claude-default                     one-shot launch with CLAUDE_CONFIG_DIR unset
@@ -190,13 +191,19 @@ on`; `claude-profile keepalive` with no args reports every account's state.
 An explicit `claude-profile refresh <account>` always runs regardless of the
 toggle — the switch only governs the unattended daemon sweep.
 
-The daemon fires at a fixed time (12:17) + login, but only ~once per
+`daemon install` registers the scheduler for your OS — a **launchd** agent on
+macOS, a **systemd `--user` timer** on Linux (with `loginctl enable-linger` so
+it runs while you're logged out). It fires daily at 12:17, but only ~once per
 14-day window does it actually make a network call. To keep that call off a
 predictable wall-clock beat, `refresh --jitter SECONDS` sleeps a random
 `0..SECONDS` **only when a grant is due** (no-op runs stay instant, before
 the lock so a concurrent swap isn't blocked). `daemon install [--jitter N]`
-bakes this into the plist (default `3600` = grants land anywhere in a 1h
-window; `--jitter 0` to disable).
+bakes this in (default `3600` = grants land anywhere in a 1h window;
+`--jitter 0` to disable).
+
+If a refresh ever fails (a token aged out entirely, or the endpoint rejects
+it), set `notify_email` in the config (or `$CLAUDE_PROFILE_NOTIFY_EMAIL`) and
+it will email you via the system `sendmail` — handy for the unattended daemon.
 
 **2. Warnings + painless re-auth.** If a token still ages out (machine off
 for weeks, revocation), you're warned in `status` **and at every `claude`
