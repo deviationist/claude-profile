@@ -1,14 +1,27 @@
 # claude-profile — TODO / roadmap
 
-## Test coverage (priority)
+## Test coverage
 
-The credential-swap path mutates real, hard-to-recover state — macOS Keychain
-items **and** `.claude.json` — so it must have committed tests. Dev-time
-scaffolding lived in a scratchpad and was never committed; rebuild it under
-`test/` with a `test/run.zsh` entry point (mirror the `claude-usage` layout) and
-wire CI.
+A committed stdlib `unittest` suite now lives at `test/test_claude_profile.py`
+(47 tests, run via `python3 test/test_claude_profile.py`), wired to CI in
+`.github/workflows/test.yml`. It stubs the network + Keychain and exercises the
+Linux file backend directly. **Covered so far:** credential store (file backend
+round-trip / 0600 / listing / delete), `refresh_gate` decisions, `credits_
+available` + `exhaust_credits` rotation, `toggle` selection, `ensure_swappable`
+guard + `--force` kill, `oauth_setting` resolution, `claude_json_path`,
+`is_exhausted`/`summarize_usage`, and the `security`-absent degrade.
 
-### Unit tests (mock `security`, temp `CLAUDE_CONFIG_DIR`, mock OAuth endpoints)
+### Still to add
+
+- **Full integration round-trips** against a mock OAuth endpoint: `save` →
+  `account` swap (assert `.claude.json` accountUuid flips, live cred updated,
+  outgoing re-parked), `refresh` grant (parked pair renewed + read-back), `auth`
+  harvest from a scratch dir.
+- **Daemon unit-file generation** (launchd plist / systemd unit content).
+- **Wrapper resolution** (path rule > toggle > default; passthrough invariant) —
+  currently only covered by the ad-hoc zsh checks, not the committed suite.
+
+### Original unit-test wishlist (mostly covered above; kept for reference)
 
 - **`activate_account` swaps the account identity correctly — the linchpin of
   same-dir subscription switching:** `.oauthAccount` is replaced *in full*

@@ -1,0 +1,18 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run unit tests
+        # Pure stdlib, no network, no Keychain — the Linux file backend is
+        # exercised natively here (IS_MACOS is False on ubuntu).
+        run: python3 test/test_claude_profile.py
