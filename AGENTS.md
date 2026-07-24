@@ -31,8 +31,16 @@ python3 stdlib):
   account's parked credential + snapshot — reverts save/auth),
   `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`.
   `status` warns when a parked refresh token nears/passes expiry
-  (`⚠ … → claude-profile auth X`) and lists saved-but-unconfigured
-  accounts so strays are visible.
+  (`⚠ … → claude-profile auth X`) — the same nudge also prints at every
+  `claude` launch of an auto profile — and lists saved-but-unconfigured
+  accounts so strays are visible. Keep-alive: `refresh [<name>]
+  [--min-days-left N] [--force]` runs the OAuth refresh grant (endpoint
+  `SET-CLAUDE-CODE-TOKEN-URL` + public client id, both verified
+  against the shipped binary) on parked, non-live accounts and re-parks
+  the new pair (write + read-back verify; mutation lock vs manual swaps;
+  live accounts never touched). `daemon install|uninstall|status` =
+  launchd agent (`com.claude-profile.refresh`, daily 12:17 + RunAtLoad,
+  log in the state dir) running `refresh --quiet`.
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.

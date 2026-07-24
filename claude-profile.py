@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HOME = os.path.expanduser("~")
@@ -50,6 +51,18 @@ LIVE_SERVICE_DEFAULT = "Claude Code-credentials"
 PARKED_SERVICE_PREFIX = "claude-profile-parked-"
 USAGE_URL = "https://SET-CLAUDE-CODE-USAGE-URL"
 USAGE_TTL = 60  # seconds; server-side usage cache freshness
+
+# OAuth refresh grant — endpoint + public client id as shipped in the Claude
+# Code binary (v2.1.206: TOKEN_URL "https://SET-CLAUDE-CODE-TOKEN-URL",
+# client id present verbatim). Env overrides exist for testing and for the day
+# these move again.
+TOKEN_URL = os.environ.get(
+    "CLAUDE_PROFILE_TOKEN_URL", "https://SET-CLAUDE-CODE-TOKEN-URL"
+)
+OAUTH_CLIENT_ID = os.environ.get(
+    "CLAUDE_PROFILE_CLIENT_ID", "SET-CLAUDE-CODE-OAUTH-CLIENT-ID"
+)
+LAUNCHD_LABEL = "com.claude-profile.refresh"
 
 # Flat (non-account-keyed) caches in .claude.json that hold single-account
 # values; cleared on swap so they regenerate for the incoming account.
@@ -459,6 +472,31 @@ def account_usage(cfg, state, profile, account, ttl=USAGE_TTL):
     return limits, 0
 
 
+# ── mutation lock ───────────────────────────────────────────────────────────
+
+import contextlib
+import fcntl
+
+
+@contextlib.contextmanager
+def mutation_lock():
+    """Serialize credential mutations (manual swaps vs the refresh daemon)."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    fd = os.open(os.path.join(STATE_DIR, ".lock"), os.O_CREAT | os.O_RDWR)
+    try:
+        for _ in range(100):  # ≤10 s
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(0.1)
+        else:
+            die("another claude-profile operation holds the lock — try again")
+        yield
+    finally:
+        os.close(fd)
+
+
 # ── swap mechanics ──────────────────────────────────────────────────────────
 
 def park_current(cfg, profile):
@@ -515,6 +553,193 @@ def activate_account(cfg, state, profile, target):
 
     state.setdefault("active_account", {})[profile] = target
     save_state(state)
+
+
+# ── keep-alive refresh (parked accounts) ────────────────────────────────────
+
+def oauth_refresh_grant(refresh_token):
+    """Perform the OAuth refresh grant Claude Code itself uses. Returns the
+    parsed response dict, or raises RuntimeError with a terse reason."""
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    attempts = [
+        ("application/json", json.dumps(payload).encode()),
+        (
+            "application/x-www-form-urlencoded",
+            urllib.parse.urlencode(payload).encode(),
+        ),
+    ]
+    last = None
+    for ctype, body in attempts:
+        req = urllib.request.Request(
+            TOKEN_URL, data=body, headers={"Content-Type": ctype}, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.load(r)
+            if data.get("access_token"):
+                return data
+            last = f"no access_token in response ({list(data)[:5]})"
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}"
+            if e.code in (400, 401, 403):
+                try:
+                    last += f" {e.read(200).decode(errors='replace')}"
+                except OSError:
+                    pass
+                # 4xx on JSON → try form encoding once; 4xx on both → give up
+                continue
+            break
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+            last = str(e)
+            break
+    raise RuntimeError(last or "unknown error")
+
+
+def refresh_account(cfg, name, min_days_left, force, quiet):
+    """Refresh a parked account's token pair in place. Returns a short result
+    string (also printed unless quiet suppresses the boring ones)."""
+    live_in = [p for p in cfg["profiles"] if current_account_of(cfg, p) == name]
+    if live_in and not force:
+        return f"{name}: skipped — live in profile \"{live_in[0]}\" (live tokens refresh themselves)"
+    blob = keychain_read(parked_service(name))
+    if blob is None:
+        return f"{name}: skipped — no parked credential"
+    try:
+        oauth = json.loads(blob).get("claudeAiOauth") or {}
+    except json.JSONDecodeError:
+        return f"{name}: skipped — unparsable parked blob"
+    rt = oauth.get("refreshToken")
+    if not rt:
+        return f"{name}: skipped — parked blob has no refresh token"
+    rexp = oauth.get("refreshTokenExpiresAt")
+    if rexp and rexp / 1000 <= time.time():
+        return f"{name}: refresh token already EXPIRED — run `claude-profile auth {name}`"
+    if not force and rexp and (rexp / 1000 - time.time()) > min_days_left * 86400:
+        days = (rexp / 1000 - time.time()) / 86400
+        return f"{name}: fresh ({days:.0f}d left) — nothing to do"
+
+    try:
+        resp = oauth_refresh_grant(rt)
+    except RuntimeError as e:
+        return f"{name}: refresh grant FAILED ({e}) — parked credential unchanged"
+
+    now_ms = int(time.time() * 1000)
+    new_oauth = dict(oauth)
+    new_oauth["accessToken"] = resp["access_token"]
+    if resp.get("expires_in"):
+        new_oauth["expiresAt"] = now_ms + int(resp["expires_in"]) * 1000
+    if resp.get("refresh_token"):
+        new_oauth["refreshToken"] = resp["refresh_token"]
+        if resp.get("refresh_token_expires_in"):
+            new_oauth["refreshTokenExpiresAt"] = (
+                now_ms + int(resp["refresh_token_expires_in"]) * 1000
+            )
+        # no expiry in response → keep the old (conservative: warns early)
+    new_blob = json.dumps({**json.loads(blob), "claudeAiOauth": new_oauth})
+
+    # write + read-back verify before declaring success — the new refresh
+    # token must never exist only in memory
+    keychain_write(parked_service(name), new_blob)
+    if keychain_read(parked_service(name)) != new_blob:
+        return f"{name}: KEYCHAIN VERIFY FAILED after refresh — run `claude-profile auth {name}`"
+    snap = load_snapshot(name) or {}
+    snap["lastRefreshedAt"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    save_snapshot(name, snap)
+    nexp = new_oauth.get("refreshTokenExpiresAt")
+    horizon = f", next expiry {fmt_reset(datetime.datetime.fromtimestamp(nexp/1000).astimezone().isoformat())}" if nexp else ""
+    return f"{name}: refreshed{horizon}"
+
+
+def cmd_refresh(args):
+    cfg = load_config()
+    if args.name:
+        names = [args.name]
+    else:
+        names = sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])})
+    results = []
+    with mutation_lock():
+        for name in names:
+            results.append(refresh_account(cfg, name, args.min_days_left, args.force, args.quiet))
+    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    for r in results:
+        boring = ": fresh (" in r or ": skipped — live in" in r
+        if not (args.quiet and boring):
+            print(f"[{stamp}] {r}")
+    if any("FAILED" in r or "EXPIRED" in r for r in results):
+        sys.exit(1)
+
+
+# ── keep-alive daemon (launchd) ─────────────────────────────────────────────
+
+def launchd_plist_path():
+    return os.path.join(HOME, "Library", "LaunchAgents", f"{LAUNCHD_LABEL}.plist")
+
+
+def cmd_daemon(args):
+    plist = launchd_plist_path()
+    uid = os.getuid()
+    if args.action == "install":
+        script = os.path.abspath(__file__)
+        log = os.path.join(STATE_DIR, "refresh.log")
+        os.makedirs(STATE_DIR, exist_ok=True)
+        content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{sys.executable}</string>
+        <string>{script}</string>
+        <string>refresh</string>
+        <string>--quiet</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>17</integer></dict>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>{log}</string>
+    <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"""
+        os.makedirs(os.path.dirname(plist), exist_ok=True)
+        atomic_write(plist, content)
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True
+        )
+        res = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", plist], capture_output=True, text=True
+        )
+        if res.returncode != 0:
+            die(f"launchctl bootstrap failed: {res.stderr.strip()}")
+        print(f"daemon installed: daily refresh at 12:17 (+ on load) — log: {log}")
+    elif args.action == "uninstall":
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True
+        )
+        try:
+            os.unlink(plist)
+        except FileNotFoundError:
+            pass
+        print("daemon uninstalled")
+    else:  # status
+        res = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True, text=True
+        )
+        loaded = res.returncode == 0
+        print(f"plist: {plist} ({'present' if os.path.exists(plist) else 'absent'})")
+        print(f"launchd: {'loaded' if loaded else 'not loaded'}")
+        log = os.path.join(STATE_DIR, "refresh.log")
+        if os.path.exists(log):
+            with open(log) as f:
+                tail = f.readlines()[-6:]
+            print("recent log:")
+            for line in tail:
+                print(f"  {line.rstrip()}")
 
 
 # ── commands ────────────────────────────────────────────────────────────────
@@ -688,19 +913,20 @@ def cmd_save(args):
     cj = load_claude_json(d)
     if not cj or not (cj.get("oauthAccount") or {}).get("accountUuid"):
         die(f"{claude_json_path(d)} has no oauthAccount — log in first")
-    keychain_write(parked_service(args.name), blob)
-    save_snapshot(
-        args.name,
-        {
-            "accountUuid": cj["oauthAccount"]["accountUuid"],
-            "oauthAccount": cj["oauthAccount"],
-            "userID": cj.get("userID"),
-            "savedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        },
-    )
-    state = load_state()
-    state.setdefault("active_account", {})[profile] = args.name
-    save_state(state)
+    with mutation_lock():
+        keychain_write(parked_service(args.name), blob)
+        save_snapshot(
+            args.name,
+            {
+                "accountUuid": cj["oauthAccount"]["accountUuid"],
+                "oauthAccount": cj["oauthAccount"],
+                "userID": cj.get("userID"),
+                "savedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            },
+        )
+        state = load_state()
+        state.setdefault("active_account", {})[profile] = args.name
+        save_state(state)
     email = cj["oauthAccount"].get("emailAddress", "?")
     print(f"saved live credential of {profile} ({email}) as account \"{args.name}\"")
     if args.name not in profile_accounts(cfg, profile):
@@ -731,7 +957,8 @@ def cmd_account(args):
             code=2,
         )
     state = load_state()
-    activate_account(cfg, state, profile, args.name)
+    with mutation_lock():
+        activate_account(cfg, state, profile, args.name)
     email = (load_snapshot(args.name) or {}).get("oauthAccount", {}).get("emailAddress", "?")
     print(f"{profile}: live account → \"{args.name}\" ({email}). Restart claude to use it.")
 
@@ -748,17 +975,18 @@ def cmd_delete(args):
     had_snap = load_snapshot(name) is not None
     if not had_parked and not had_snap:
         die(f"account \"{name}\" has nothing saved")
-    keychain_delete(parked_service(name))
-    try:
-        os.unlink(snapshot_path(name))
-    except FileNotFoundError:
-        pass
-    state = load_state()
-    for prof, acct in list((state.get("active_account") or {}).items()):
-        if acct == name:
-            del state["active_account"][prof]
-    (state.get("usage") or {}).pop(name, None)
-    save_state(state)
+    with mutation_lock():
+        keychain_delete(parked_service(name))
+        try:
+            os.unlink(snapshot_path(name))
+        except FileNotFoundError:
+            pass
+        state = load_state()
+        for prof, acct in list((state.get("active_account") or {}).items()):
+            if acct == name:
+                del state["active_account"][prof]
+        (state.get("usage") or {}).pop(name, None)
+        save_state(state)
     print(f"deleted \"{name}\" — parked credential and snapshot removed (live logins untouched)")
     for p in live_in:
         print(
@@ -818,16 +1046,17 @@ def cmd_auth(args):
             f"(--force to accept; scratch login kept for a --no-launch retry)"
         )
 
-    keychain_write(parked_service(name), blob)
-    save_snapshot(
-        name,
-        {
-            "accountUuid": oauth_acct["accountUuid"],
-            "oauthAccount": oauth_acct,
-            "userID": cj.get("userID"),
-            "savedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        },
-    )
+    with mutation_lock():
+        keychain_write(parked_service(name), blob)
+        save_snapshot(
+            name,
+            {
+                "accountUuid": oauth_acct["accountUuid"],
+                "oauthAccount": oauth_acct,
+                "userID": cj.get("userID"),
+                "savedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            },
+        )
     # hygiene: no credentials linger outside the parked item
     keychain_delete(svc)
     shutil.rmtree(scratch, ignore_errors=True)
@@ -855,6 +1084,20 @@ def cmd_rotate(args):
     d = profile_dir(cfg, profile)
     state = load_state()
     current = current_account_of(cfg, profile)
+
+    # Aging-refresh-token nudge: printed even under --quiet (rare, actionable —
+    # a parked account nearing refresh expiry means a forced re-login later).
+    for acct in accounts:
+        if acct == current:
+            continue
+        blob = keychain_read(parked_service(acct))
+        health = refresh_health(blob) if blob else ""
+        if health:
+            print(
+                f"claude-profile: ⚠ account \"{acct}\": {health} — run `claude-profile auth {acct}`",
+                file=sys.stderr,
+            )
+
     if current is None:
         if not args.quiet:
             print("live account unrecognized — run `claude-profile save <name>` first")
@@ -897,7 +1140,8 @@ def cmd_rotate(args):
             file=sys.stderr,
         )
         return
-    activate_account(cfg, state, profile, target)
+    with mutation_lock():
+        activate_account(cfg, state, profile, target)
     print(f"claude-profile: rotated {profile}: \"{current}\" ({why}) → \"{target}\"", file=sys.stderr)
 
 
@@ -979,6 +1223,25 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_rotate)
+
+    p = sub.add_parser(
+        "refresh",
+        help="keep-alive: renew parked accounts' refresh tokens via the OAuth refresh grant",
+    )
+    p.add_argument("name", nargs="?", help="account to refresh (default: all configured)")
+    p.add_argument(
+        "--min-days-left",
+        type=float,
+        default=14,
+        help="only refresh when the refresh token has fewer days left (default 14)",
+    )
+    p.add_argument("--force", action="store_true", help="refresh even if fresh or live (unsafe when live)")
+    p.add_argument("--quiet", action="store_true", help="suppress nothing-to-do lines (daemon mode)")
+    p.set_defaults(func=cmd_refresh)
+
+    p = sub.add_parser("daemon", help="manage the launchd keep-alive daemon")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.set_defaults(func=cmd_daemon)
 
     p = sub.add_parser("auto", help="toggle auto-rotation for a profile")
     p.add_argument("mode", choices=["on", "off"])
