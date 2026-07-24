@@ -47,7 +47,12 @@ python3 stdlib):
   accounts never touched). `refresh_gate()` is the single source of truth
   for "is a grant due?" — shared by the real refresh and the `--jitter`
   pre-check, which sleeps a random `0..SECONDS` (pre-lock) only when a grant
-  is actually due. `daemon install [--jitter N]|uninstall|status` = launchd
+  is actually due. Keep-alive is **per-account opt-out**: `keepalive
+  [<account>] [on|off]` (no args = report) writes the config `keepalive` map
+  (account → bool, default true, `account_keepalive()`); the daemon sweep
+  (`refresh` with no name) skips off accounts, but an explicit `refresh
+  <account>` ignores the toggle. `status` shows `keep-alive OFF`.
+  `daemon install [--jitter N]|uninstall|status` = launchd
   agent (`com.claude-profile.refresh`, daily 12:17 + RunAtLoad, log in the
   state dir) running `refresh --quiet --jitter <N>` (default 3600).
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.

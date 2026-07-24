@@ -200,6 +200,13 @@ def is_serial(cfg, name):
     return len(profile_accounts(cfg, name)) > 1
 
 
+def account_keepalive(cfg, account):
+    """Whether the keep-alive daemon should renew this account's refresh token.
+    Default True; flip with `claude-profile keepalive <account> off`. Stored in
+    the top-level `keepalive` map of config.json (account → bool)."""
+    return bool((cfg.get("keepalive") or {}).get(account, True))
+
+
 # ── profile resolution ──────────────────────────────────────────────────────
 
 def resolve_profile(cfg, state, pwd):
@@ -696,10 +703,15 @@ def refresh_account(cfg, name, min_days_left, force, quiet):
 
 def cmd_refresh(args):
     cfg = load_config()
+    pre = []
     if args.name:
+        # explicit account → honored regardless of its keep-alive setting
         names = [args.name]
     else:
-        names = sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])})
+        # all-accounts / daemon run → skip accounts with keep-alive turned off
+        alln = sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])})
+        names = [n for n in alln if account_keepalive(cfg, n)]
+        pre = [f"{n}: skipped — keep-alive disabled" for n in alln if not account_keepalive(cfg, n)]
 
     # Timing jitter: if (and only if) a grant is actually due, sleep a random
     # 0..jitter seconds first, so the daemon's request never lands at a fixed
@@ -713,13 +725,13 @@ def cmd_refresh(args):
         print(f"[{stamp}] jitter: sleeping {delay:.0f}s before grant", file=sys.stderr)
         time.sleep(delay)
 
-    results = []
+    results = list(pre)
     with mutation_lock():
         for name in names:
             results.append(refresh_account(cfg, name, args.min_days_left, args.force, args.quiet))
     stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     for r in results:
-        boring = ": fresh (" in r or ": skipped — live in" in r
+        boring = ": fresh (" in r or ": skipped — live in" in r or ": skipped — keep-alive" in r
         if not (args.quiet and boring):
             print(f"[{stamp}] {r}")
     if any("FAILED" in r or "EXPIRED" in r for r in results):
@@ -929,6 +941,8 @@ def cmd_status(args):
                 usage += f"  ⚠ {health} → claude-profile auth {acct}"
             print(f"    {'▸' if is_live else ' '} {acct:<10} {tag} {email}{usage}")
             th = token_horizon(blob, snap)
+            if not account_keepalive(cfg, acct):
+                th = (th + "  · keep-alive OFF") if th else "keep-alive OFF"
             if th:
                 print(f"        {th}")
         if accounts and current is None:
@@ -1258,6 +1272,32 @@ def cmd_auto(args):
     print(f"profile \"{profile}\": auto-rotate {args.mode}")
 
 
+def cmd_keepalive(args):
+    """Per-account switch for keep-alive refresh-token renewal. No mode → report
+    (all, or one account); mode on|off → set and persist to config."""
+    cfg = load_config()
+    known = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
+    known |= saved_account_names()
+    if args.mode is None:
+        targets = sorted(known)
+        if args.account:
+            if args.account not in known:
+                die(f"unknown account \"{args.account}\"")
+            targets = [args.account]
+        print("keep-alive (refresh-token renewal):")
+        for a in targets:
+            print(f"  {a:<12} {'on' if account_keepalive(cfg, a) else 'OFF'}")
+        return
+    if not args.account or args.account not in known:
+        die(f"unknown account \"{args.account or ''}\" — see `claude-profile keepalive`")
+    cfg.setdefault("keepalive", {})[args.account] = args.mode == "on"
+    save_config(cfg)
+    print(f"keep-alive for \"{args.account}\": {'on' if args.mode == 'on' else 'OFF'}")
+    if args.mode == "off":
+        print("  its refresh token will now age out on its own — `claude-profile auth "
+              f"{args.account}` (or keepalive on) before it expires")
+
+
 def cmd_usage(args):
     cfg = load_config()
     state = load_state()
@@ -1366,6 +1406,14 @@ def main():
     p.add_argument("mode", choices=["on", "off"])
     p.add_argument("--profile")
     p.set_defaults(func=cmd_auto)
+
+    p = sub.add_parser(
+        "keepalive",
+        help="per-account: whether keep-alive renews its refresh token (no args = report)",
+    )
+    p.add_argument("account", nargs="?")
+    p.add_argument("mode", nargs="?", choices=["on", "off"])
+    p.set_defaults(func=cmd_keepalive)
 
     p = sub.add_parser("usage", help="show per-account usage")
     p.add_argument("--profile")
