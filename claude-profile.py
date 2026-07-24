@@ -383,6 +383,28 @@ def token_from_blob(blob):
     return None
 
 
+def refresh_expiry_ms(blob):
+    """refreshTokenExpiresAt (ms epoch) from a credential blob, or None."""
+    try:
+        return json.loads(blob).get("claudeAiOauth", {}).get("refreshTokenExpiresAt")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
+def refresh_health(blob):
+    """'' | 'refresh expires in Nd' (≤14d) | 'refresh EXPIRED' for a blob."""
+    exp = refresh_expiry_ms(blob)
+    if not exp:
+        return ""
+    left = exp / 1000 - time.time()
+    if left <= 0:
+        return "refresh EXPIRED"
+    days = left / 86400
+    if days <= 14:
+        return f"refresh expires in {days:.0f}d"
+    return ""
+
+
 def account_usage(cfg, state, profile, account, ttl=USAGE_TTL):
     """Cached usage summary for an account (live or parked). Returns
     (limits|None, age_seconds|None). None = unknown (no valid token / offline);
@@ -538,8 +560,8 @@ def cmd_status(args):
             print(f"    live sessions: {len(sessions)} (account swap blocked)")
         for acct in accounts:
             snap = load_snapshot(acct)
-            parked = keychain_read(parked_service(acct)) is not None
-            tag = "ACTIVE " if acct == current else ("parked " if parked else "UNSAVED")
+            parked_blob = keychain_read(parked_service(acct))
+            tag = "ACTIVE " if acct == current else ("parked " if parked_blob else "UNSAVED")
             email = (snap or {}).get("oauthAccount", {}) or {}
             email = email.get("emailAddress", "")
             if args.usage:
@@ -548,6 +570,9 @@ def cmd_status(args):
             else:
                 cache = (state.get("usage") or {}).get(acct)
                 usage = "  " + fmt_limits(cache.get("limits")) if cache else ""
+            health = refresh_health(parked_blob) if (parked_blob and acct != current) else ""
+            if health:
+                usage += f"  ⚠ {health} → claude-profile auth {acct}"
             print(f"    {'▸' if acct == current else ' '} {acct:<10} {tag} {email}{usage}")
         if accounts and current is None:
             print("      (live account unrecognized — run `claude-profile save <name>`)")
@@ -669,6 +694,83 @@ def cmd_account(args):
     print(f"{profile}: live account → \"{args.name}\" ({email}). Restart claude to use it.")
 
 
+def cmd_auth(args):
+    """Re-authenticate a (possibly parked) account without touching any live
+    profile: run the login flow in a throwaway scratch config dir, harvest the
+    fresh credential from the scratch dir's own Keychain item, park it under
+    the account name, then wipe the scratch dir and its Keychain item."""
+    import shutil
+
+    load_config()  # config must exist/parse, keeps UX consistent
+    name = args.name
+    scratch = os.path.join(STATE_DIR, "auth-scratch")
+    svc = live_service(scratch)
+
+    if not args.no_launch:
+        # wipe any previous scratch login so claude forces a fresh /login
+        keychain_delete(svc)
+        shutil.rmtree(scratch, ignore_errors=True)
+        os.makedirs(scratch, exist_ok=True)
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            die("`claude` binary not found in PATH")
+        print(f"Capturing fresh credentials for \"{name}\" via a throwaway config dir.")
+        print(f"  1. complete the login — the browser must be signed into the {name} account")
+        print("  2. once logged in, just QUIT claude (Ctrl+C twice)")
+        print()
+        subprocess.call([claude_bin], env=dict(os.environ, CLAUDE_CONFIG_DIR=scratch))
+        print()
+
+    blob = keychain_read(svc)
+    try:
+        with open(os.path.join(scratch, ".claude.json")) as f:
+            cj = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        cj = {}
+    oauth_acct = cj.get("oauthAccount") or {}
+    if blob is None or not oauth_acct.get("accountUuid"):
+        die("no login captured in the scratch dir — nothing changed")
+
+    email = oauth_acct.get("emailAddress", "?")
+    prev = load_snapshot(name)
+    if (
+        prev
+        and prev.get("accountUuid")
+        and prev["accountUuid"] != oauth_acct["accountUuid"]
+        and not args.force
+    ):
+        die(
+            f"captured login ({email}) is a different account than \"{name}\"'s "
+            f"recorded one — signed into the wrong claude.ai account? "
+            f"(--force to accept; scratch login kept for a --no-launch retry)"
+        )
+
+    keychain_write(parked_service(name), blob)
+    save_snapshot(
+        name,
+        {
+            "accountUuid": oauth_acct["accountUuid"],
+            "oauthAccount": oauth_acct,
+            "userID": cj.get("userID"),
+            "savedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        },
+    )
+    # hygiene: no credentials linger outside the parked item
+    keychain_delete(svc)
+    shutil.rmtree(scratch, ignore_errors=True)
+    print(f"parked fresh credentials for \"{name}\" ({email}).")
+
+    cfg = load_config()
+    for pname in cfg["profiles"]:
+        if current_account_of(cfg, pname) == name:
+            print(
+                f"note: \"{name}\" is currently LIVE in profile \"{pname}\" — its live "
+                f"credential was not modified (live tokens refresh themselves); the "
+                f"parked copy applies at the next swap back to it."
+            )
+    sys.exit(0)
+
+
 def cmd_rotate(args):
     cfg = load_config()
     profile = pick_profile(cfg, args)
@@ -780,6 +882,19 @@ def main():
     p.add_argument("--profile")
     p.add_argument("--force", action="store_true", help="swap even with live sessions (unsafe)")
     p.set_defaults(func=cmd_account)
+
+    p = sub.add_parser(
+        "auth",
+        help="re-authenticate an account via a throwaway config dir (live profiles untouched)",
+    )
+    p.add_argument("name")
+    p.add_argument("--force", action="store_true", help="accept a login that mismatches the recorded account")
+    p.add_argument(
+        "--no-launch",
+        action="store_true",
+        help="skip launching claude; harvest an existing scratch-dir login",
+    )
+    p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("rotate", help="switch to the next non-exhausted account")
     p.add_argument("--profile")

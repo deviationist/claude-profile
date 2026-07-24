@@ -122,14 +122,14 @@ claude-profile() {
           set -- use "${sel%%$'\t'*}"
         fi
         ;;
-      account)
+      account|auth)
         if [[ -z "$2" || "$2" == --* ]]; then
-          local sel
+          local _cmd="$1" sel
           sel=$(_claude_profile_py accounts 2>/dev/null \
-                | fzf --height=~10 --reverse --prompt='account> ' \
+                | fzf --height=~10 --reverse --prompt="${_cmd}> " \
                       --with-nth=1,2 --delimiter=$'\t' \
-                      --header='select live account (swap needs claude restarted)') || return
-          set -- account "${sel%%$'\t'*}" "${@:2}"
+                      --header="select account for '${_cmd}' (esc to cancel)") || return
+          set -- "$_cmd" "${sel%%$'\t'*}" "${@:2}"
         fi
         ;;
     esac

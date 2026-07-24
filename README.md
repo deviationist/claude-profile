@@ -99,6 +99,8 @@ claude-profile status --usage      …with fresh usage from the API
 claude-profile use [<name>|default]   toggle the active profile (fzf picker w/o name)
 claude-profile account [<name>]    swap the live account (serial; fzf picker w/o name)
 claude-profile save <name>         park the dir's current login as account <name>
+claude-profile auth [<name>]       re-authenticate an account via a throwaway
+                                   config dir — live profiles untouched
 claude-profile rotate [--dry-run]  switch to the next non-exhausted account
 claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
@@ -120,6 +122,24 @@ claude-profile account max20x # …and flip back
 
 From then on: `claude-profile account <name>` any time (restart Claude
 after), or let auto mode handle it.
+
+### Re-authenticating a parked account
+
+A parked account's refresh token can eventually expire (`status` warns with
+`⚠ refresh expires in Nd` / `refresh EXPIRED`). Fixing it does **not**
+require swapping it live:
+
+```sh
+claude-profile auth max5x
+```
+
+This launches Claude Code in a **throwaway scratch config dir** (under the
+state dir), where you complete a normal login for that account and quit.
+The fresh credential is harvested from the scratch dir's own Keychain item,
+parked under the account name, and the scratch dir + its Keychain item are
+wiped. Your live profile is never touched. A login that doesn't match the
+account's recorded identity is rejected (`--force` overrides;
+`--no-launch` re-harvests the kept scratch login after a mismatch).
 
 ## How serial switching works
 
