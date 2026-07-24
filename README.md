@@ -53,7 +53,11 @@ edit this by hand; the CLI reads it:
       "dir": "~/.claude",           // the Claude Code config dir
       "paths": [],                  // cwd prefixes that auto-select this profile
       "accounts": ["max20x", "max5x"],  // credential slots (order = rotation order)
-      "auto": true                  // rotate off an exhausted account at launch
+      "auto": true,                 // rotate off an exhausted account at launch
+      "exhaust_credits": false      // false: swap at the rate limit. true: keep
+                                    // burning this account's extra-usage credits
+                                    // first, swap only when they're near-spent
+                                    // (~99% — Claude stops just before the cap)
     }
   },
   "oauth": {                        // OPTIONAL — only for refresh/usage; see "OAuth constants"
@@ -249,6 +253,13 @@ Auto mode runs the equivalent of `rotate --if-exhausted` before each launch:
 exhaustion is read from Claude's own OAuth usage endpoint (any rate-limit
 window at ≥100%), cached for 60 s. Unknown usage (offline, stale token) is
 treated as *not* exhausted — a launch is never blocked on a guess.
+
+With **`exhaust_credits: true`** on the profile, a rate-limited account isn't
+considered exhausted while it still has usable **extra-usage (overage)
+credits** — auto mode stays put so you burn those credits first, and only
+rotates once they're near-spent (`extra_usage.utilization ≥ 99%`; Claude stops
+just shy of the cap) or extra usage is disabled/absent. Default is `false`:
+rotate the moment the rate limit hits, spending no credits.
 
 ## Safety guarantees
 

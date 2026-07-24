@@ -32,6 +32,11 @@ python3 stdlib):
   untouched; rejects a mismatched login), `delete <name>` (remove an
   account's parked credential + snapshot — reverts save/auth),
   `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`.
+  Per-profile **`exhaust_credits`** (config, default false): when true, a
+  rate-limited account isn't "exhausted" for rotation while it still has
+  extra-usage credits (`credits_available()` off `usage.extra_usage`; near-cap
+  threshold `CREDITS_EXHAUSTED_PCT=99`, since Claude stops just before the cap)
+  — so auto mode burns credits first, then swaps.
   `status` prints a per-account **token line** (access-token life, refresh-
   token life + absolute expiry date, and `saved`/`rotated <date>` — the
   `rotated` label confirms the keep-alive ran; live account reads the live
