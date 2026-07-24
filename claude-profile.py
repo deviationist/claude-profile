@@ -208,6 +208,13 @@ def account_keepalive(cfg, account):
     return bool((cfg.get("keepalive") or {}).get(account, True))
 
 
+def profile_exhaust_credits(cfg, profile):
+    """Whether auto-rotation should burn a rate-limited account's extra-usage
+    (overage) credits before swapping off it. Default False (swap at the rate
+    limit; don't spend credits). Per-profile `exhaust_credits` in config.json."""
+    return bool(cfg["profiles"].get(profile, {}).get("exhaust_credits", False))
+
+
 # ── profile resolution ──────────────────────────────────────────────────────
 
 def resolve_profile(cfg, state, pwd):
@@ -618,6 +625,31 @@ def is_exhausted(limits):
     return any(l["utilization"] >= 100 for l in limits)
 
 
+# Claude Code stops *before* the extra-usage cap is fully hit (it halts when
+# you're close, e.g. ~$99 of a $100 limit), so treat near-cap as exhausted —
+# otherwise rotation would wait for 100% that never arrives and leave you stuck
+# on a stopped account.
+CREDITS_EXHAUSTED_PCT = 99
+
+
+def credits_available(data):
+    """True iff the account has usable extra-usage (overage) credits *right now*:
+    extra usage is enabled, its spend limit isn't reached, and utilization is
+    below the near-cap threshold. Basis for the per-profile `exhaust_credits`
+    option (burn credits before rotating off a rate-limited account).
+    Disabled/absent extra_usage → False — nothing to exhaust, don't wait."""
+    eu = (data or {}).get("extra_usage") or {}
+    if not eu.get("is_enabled") or eu.get("spend_limit_reached"):
+        return False
+    util = eu.get("utilization")
+    try:
+        if util is not None and float(util) >= CREDITS_EXHAUSTED_PCT:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
 def token_from_blob(blob):
     try:
         d = json.loads(blob)
@@ -675,9 +707,18 @@ def account_usage(cfg, state, profile, account, ttl=USAGE_TTL):
     if data is None:
         return (cache or {}).get("limits"), None
     limits = summarize_usage(data)
-    state["usage"][account] = {"checked_at": now, "limits": limits}
+    state["usage"][account] = {
+        "checked_at": now,
+        "limits": limits,
+        "credits_available": credits_available(data),
+    }
     save_state(state)
     return limits, 0
+
+
+def account_credits(state, account):
+    """Cached extra-usage credit availability (True/False), or None if unknown."""
+    return ((state.get("usage") or {}).get(account) or {}).get("credits_available")
 
 
 # ── mutation lock ───────────────────────────────────────────────────────────
@@ -1533,10 +1574,21 @@ def cmd_rotate(args):
         return
 
     limits, _ = account_usage(cfg, state, profile, current)
-    cur_exhausted = limits is not None and is_exhausted(limits)
+    rate_limited = limits is not None and is_exhausted(limits)
+    cur_exhausted = rate_limited
+    burning_credits = False
+    if rate_limited and profile_exhaust_credits(cfg, profile) and account_credits(state, current):
+        # rate-limited, but this profile opts to spend extra-usage credits first
+        # and some remain → not "exhausted" for rotation purposes yet
+        cur_exhausted = False
+        burning_credits = True
     if args.if_exhausted and not cur_exhausted:
         if not args.quiet:
-            print(f"\"{current}\" not exhausted ({fmt_limits(limits)}) — no rotation")
+            if burning_credits:
+                print(f"\"{current}\" rate-limited but still has extra-usage credits "
+                      f"(exhaust_credits on) — staying put")
+            else:
+                print(f"\"{current}\" not exhausted ({fmt_limits(limits)}) — no rotation")
         return
 
     # next non-exhausted account in list order, wrapping past the current one
