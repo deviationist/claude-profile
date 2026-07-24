@@ -27,9 +27,12 @@ python3 stdlib):
   exists), `save <name>` (park current login as a named account —
   bootstrap), `auth <name>` (re-authenticate via a throwaway scratch
   config dir — harvest login → park → wipe scratch; live profiles
-  untouched; rejects a mismatched login), `rotate [--if-exhausted]
-  [--dry-run]`, `auto on|off`, `usage [--fresh]`. `status` warns when a
-  parked refresh token nears/passes expiry (`⚠ … → claude-profile auth X`).
+  untouched; rejects a mismatched login), `delete <name>` (remove an
+  account's parked credential + snapshot — reverts save/auth),
+  `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`.
+  `status` warns when a parked refresh token nears/passes expiry
+  (`⚠ … → claude-profile auth X`) and lists saved-but-unconfigured
+  accounts so strays are visible.
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.

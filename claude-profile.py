@@ -262,6 +262,27 @@ def save_snapshot(account, snap):
     atomic_write(snapshot_path(account), json.dumps(snap, indent=2) + "\n")
 
 
+def all_parked_names():
+    """Names of every parked Keychain item (claude-profile-parked-*), scraped
+    from `security dump-keychain` metadata (no secrets read)."""
+    res = _security(["dump-keychain"])
+    names = set()
+    for line in res.stdout.splitlines():
+        if PARKED_SERVICE_PREFIX in line and '"svce"' in line:
+            try:
+                svc = line.split('="', 1)[1].rstrip('"')
+            except IndexError:
+                continue
+            if svc.startswith(PARKED_SERVICE_PREFIX):
+                names.add(svc[len(PARKED_SERVICE_PREFIX):])
+    return names
+
+
+def saved_account_names():
+    """Every account with stored artifacts: snapshot and/or parked item."""
+    return set(all_snapshots()) | all_parked_names()
+
+
 def all_snapshots():
     out = {}
     if os.path.isdir(ACCOUNTS_DIR):
@@ -276,17 +297,23 @@ def all_snapshots():
 
 def current_account_of(cfg, profile):
     """Name of the account currently live in the profile's dir, matched by
-    accountUuid against the snapshots. None if unknown/unsaved."""
+    accountUuid against the snapshots. None if unknown/unsaved. When several
+    snapshots share the uuid (e.g. a rename in progress), a name listed in
+    the profile's accounts wins over a stray."""
     cj = load_claude_json(profile_dir(cfg, profile))
     if not cj:
         return None
     uuid = (cj.get("oauthAccount") or {}).get("accountUuid")
     if not uuid:
         return None
-    for name, snap in all_snapshots().items():
-        if snap.get("accountUuid") == uuid:
-            return name
-    return None
+    matches = [n for n, s in all_snapshots().items() if s.get("accountUuid") == uuid]
+    if not matches:
+        return None
+    listed = profile_accounts(cfg, profile)
+    for n in listed:
+        if n in matches:
+            return n
+    return matches[0]
 
 
 # ── live sessions guard ─────────────────────────────────────────────────────
@@ -576,6 +603,17 @@ def cmd_status(args):
             print(f"    {'▸' if acct == current else ' '} {acct:<10} {tag} {email}{usage}")
         if accounts and current is None:
             print("      (live account unrecognized — run `claude-profile save <name>`)")
+    configured = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
+    strays = sorted(saved_account_names() - configured)
+    if strays:
+        print()
+        print("saved but not in any profile (`claude-profile delete <name>` to remove):")
+        for name in strays:
+            snap = load_snapshot(name) or {}
+            email = (snap.get("oauthAccount") or {}).get("emailAddress", "")
+            parked = "parked" if keychain_read(parked_service(name)) is not None else "snapshot-only"
+            saved_at = snap.get("savedAt", "")
+            print(f"    {name:<10} {parked}  {email}  {saved_at}")
     sys.exit(0)
 
 
@@ -610,11 +648,15 @@ def cmd_accounts(args):
     cfg = load_config()
     profile = pick_profile(cfg, args)
     current = current_account_of(cfg, profile)
-    for acct in profile_accounts(cfg, profile):
+    listed = profile_accounts(cfg, profile)
+    for acct in listed:
         state = "active" if acct == current else (
             "parked" if keychain_read(parked_service(acct)) is not None else "unsaved"
         )
         print(f"{acct}\t{state}\t{profile}")
+    configured = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
+    for acct in sorted(saved_account_names() - configured):
+        print(f"{acct}\tsaved\t-")
 
 
 def cmd_use(args):
@@ -692,6 +734,37 @@ def cmd_account(args):
     activate_account(cfg, state, profile, args.name)
     email = (load_snapshot(args.name) or {}).get("oauthAccount", {}).get("emailAddress", "?")
     print(f"{profile}: live account → \"{args.name}\" ({email}). Restart claude to use it.")
+
+
+def cmd_delete(args):
+    """Delete an account's stored artifacts: its parked Keychain credential
+    and metadata snapshot. Reverts a `save`/`auth`. Never touches live
+    credentials."""
+    cfg = load_config()
+    name = args.name
+    # capture live-ness BEFORE deleting the snapshot (matching needs it)
+    live_in = [p for p in cfg["profiles"] if current_account_of(cfg, p) == name]
+    had_parked = keychain_read(parked_service(name)) is not None
+    had_snap = load_snapshot(name) is not None
+    if not had_parked and not had_snap:
+        die(f"account \"{name}\" has nothing saved")
+    keychain_delete(parked_service(name))
+    try:
+        os.unlink(snapshot_path(name))
+    except FileNotFoundError:
+        pass
+    state = load_state()
+    for prof, acct in list((state.get("active_account") or {}).items()):
+        if acct == name:
+            del state["active_account"][prof]
+    (state.get("usage") or {}).pop(name, None)
+    save_state(state)
+    print(f"deleted \"{name}\" — parked credential and snapshot removed (live logins untouched)")
+    for p in live_in:
+        print(
+            f"note: \"{name}\" is still the live login of profile \"{p}\" — it now shows "
+            f"as unrecognized/UNSAVED, and swaps off it will refuse until you `save` it again"
+        )
 
 
 def cmd_auth(args):
@@ -882,6 +955,10 @@ def main():
     p.add_argument("--profile")
     p.add_argument("--force", action="store_true", help="swap even with live sessions (unsafe)")
     p.set_defaults(func=cmd_account)
+
+    p = sub.add_parser("delete", help="delete an account's parked credential + snapshot (reverts save/auth)")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_delete)
 
     p = sub.add_parser(
         "auth",

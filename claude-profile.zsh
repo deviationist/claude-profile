@@ -122,7 +122,7 @@ claude-profile() {
           set -- use "${sel%%$'\t'*}"
         fi
         ;;
-      account|auth)
+      account|auth|delete)
         if [[ -z "$2" || "$2" == --* ]]; then
           local _cmd="$1" sel
           sel=$(_claude_profile_py accounts 2>/dev/null \
