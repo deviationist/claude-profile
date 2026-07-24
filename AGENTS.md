@@ -54,9 +54,13 @@ python3 stdlib):
   (account → bool, default true, `account_keepalive()`); the daemon sweep
   (`refresh` with no name) skips off accounts, but an explicit `refresh
   <account>` ignores the toggle. `status` shows `keep-alive OFF`.
-  `daemon install [--jitter N]|uninstall|status` = launchd
-  agent (`com.claude-profile.refresh`, daily 12:17 + RunAtLoad, log in the
-  state dir) running `refresh --quiet --jitter <N>` (default 3600).
+  `daemon install [--jitter N]|uninstall|status` = keep-alive scheduler,
+  daily 12:17, running `refresh --quiet --jitter <N>` (default 3600), logging
+  to the state dir. **macOS** = launchd agent (`com.claude-profile.refresh`,
+  RunAtLoad). **Linux** = systemd `--user` timer (`claude-profile-refresh`,
+  Persistent catch-up) + `loginctl enable-linger` so it fires while logged
+  out; `_sctl()` injects `XDG_RUNTIME_DIR` for SSH sessions. Dispatched by
+  `IS_MACOS`.
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.

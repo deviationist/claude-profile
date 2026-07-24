@@ -1,7 +1,10 @@
 # claude-profile
 
-Juggle multiple Claude subscriptions in [Claude Code](https://claude.com/claude-code) — without ever
-feeling the switch.
+Juggle multiple Claude subscriptions in [Claude Code](https://claude.com/claude-code) — the environment
+comes across unchanged (memory, sessions, settings, per-project trust all
+persist); only the credential changes underneath. A swap does need a Claude
+restart (a running session keeps its old token), so it's a between-sessions
+switch, not mid-session.
 
 Two composable modes:
 
@@ -19,8 +22,11 @@ Two composable modes:
 The modes nest: a work machine can run a `work` profile plus a `personal`
 profile whose two Max subscriptions rotate serially inside it.
 
-> macOS-first: the credential store is the macOS Keychain. Linux support
-> (`<dir>/.credentials.json`) is a planned follow-up.
+> Works on **macOS and Linux**. The credential store is platform-specific:
+> the macOS login Keychain, or on Linux the `.credentials.json` files Claude
+> Code itself uses (live: `<dir>/.credentials.json`; parked: mode-0600 files
+> under the state dir). The keep-alive daemon is a launchd agent on macOS and
+> a systemd `--user` timer on Linux. Everything else is identical.
 
 ## Install
 
@@ -82,8 +88,10 @@ subscriptions serially:
 
 Runtime state (active toggle, live account per profile, usage cache,
 non-secret account metadata) lives in `~/.local/state/claude-profile/`
-(`$XDG_STATE_HOME` respected). **Credentials are never written to disk** —
-parked accounts are Keychain items (`claude-profile-parked-<name>`).
+(`$XDG_STATE_HOME` respected). Parked credentials: on **macOS**, Keychain
+items (`claude-profile-parked-<name>`), never on disk; on **Linux**,
+mode-0600 files under the state dir (`parked/<name>.json`) — the same
+protection as Claude Code's own `.credentials.json`.
 
 ### OAuth constants
 
@@ -237,10 +245,13 @@ treated as *not* exhausted — a launch is never blocked on a guess.
 
 ## Safety guarantees
 
-- **Secrets never touch disk** and never appear in process argv (Keychain
-  writes go through `security -i` on stdin). State files hold only
+- **Secrets never appear in process argv** (macOS Keychain writes go through
+  `security -i` on stdin; Linux writes are atomic 0600 files). On macOS
+  secrets never touch disk (Keychain); on Linux parked tokens are 0600 files,
+  matching Claude Code's own credential handling. State files hold only
   metadata: email, account UUIDs, timestamps, usage numbers.
-- **No swap under live sessions** — enforced in `account` and `rotate`;
+- **No swap under live sessions** — enforced in `account`, `toggle`, `rotate`
+  (`--force` terminates them first);
   auto mode degrades to a warning and launches on the exhausted account.
 - **Transparent when idle** — no config file, or the resolved profile is the
   default `~/.claude`: the wrapper adds nothing but (macOS) a `caffeinate`
