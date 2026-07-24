@@ -34,13 +34,17 @@ python3 stdlib):
   (`⚠ … → claude-profile auth X`) — the same nudge also prints at every
   `claude` launch of an auto profile — and lists saved-but-unconfigured
   accounts so strays are visible. Keep-alive: `refresh [<name>]
-  [--min-days-left N] [--force]` runs the OAuth refresh grant (endpoint
-  `SET-CLAUDE-CODE-TOKEN-URL` + public client id, both verified
-  against the shipped binary) on parked, non-live accounts and re-parks
-  the new pair (write + read-back verify; mutation lock vs manual swaps;
-  live accounts never touched). `daemon install|uninstall|status` =
-  launchd agent (`com.claude-profile.refresh`, daily 12:17 + RunAtLoad,
-  log in the state dir) running `refresh --quiet`.
+  [--min-days-left N] [--force] [--jitter SECONDS]` runs the OAuth refresh
+  grant (endpoint `SET-CLAUDE-CODE-TOKEN-URL` + public client id,
+  both verified against the shipped binary; transport is curl w/ a CLI UA —
+  urllib is CF-1010-blocked) on parked, non-live accounts and re-parks the
+  new pair (write + read-back verify; mutation lock vs manual swaps; live
+  accounts never touched). `refresh_gate()` is the single source of truth
+  for "is a grant due?" — shared by the real refresh and the `--jitter`
+  pre-check, which sleeps a random `0..SECONDS` (pre-lock) only when a grant
+  is actually due. `daemon install [--jitter N]|uninstall|status` = launchd
+  agent (`com.claude-profile.refresh`, daily 12:17 + RunAtLoad, log in the
+  state dir) running `refresh --quiet --jitter <N>` (default 3600).
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.
