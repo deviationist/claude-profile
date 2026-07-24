@@ -25,8 +25,11 @@ python3 stdlib):
   profile toggle, fzf picker w/o name), `account <name>` (serial credential
   swap, fzf picker w/o name; refuses under live sessions, `--force`
   exists), `save <name>` (park current login as a named account —
-  bootstrap), `rotate [--if-exhausted] [--dry-run]`, `auto on|off`,
-  `usage [--fresh]`.
+  bootstrap), `auth <name>` (re-authenticate via a throwaway scratch
+  config dir — harvest login → park → wipe scratch; live profiles
+  untouched; rejects a mismatched login), `rotate [--if-exhausted]
+  [--dry-run]`, `auto on|off`, `usage [--fresh]`. `status` warns when a
+  parked refresh token nears/passes expiry (`⚠ … → claude-profile auth X`).
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.
