@@ -135,6 +135,18 @@ claude-profile() {
     esac
   fi
   _claude_profile_py "$@"
+  local _rc=$?
+  # A serial account swap changes the credential under the SAME config dir, so
+  # claude-usage's dir-keyed cache keeps serving the previous account's numbers
+  # until its TTL lapses. On a successful swap, force an immediate background
+  # refresh so the statusline catches up within ~a second. (Only one account is
+  # live per dir, so the dir-keyed cache is correct once refreshed — no need to
+  # pay a per-tick .claude.json read to key the cache per account.)
+  if (( _rc == 0 )) && [[ "$1" == (account|rotate) && "$*" != *--dry-run* ]] \
+     && (( ${+functions[claude-usage]} )); then
+    ( claude-usage --fresh >/dev/null 2>&1 & )
+  fi
+  return $_rc
 }
 
 # claude-switch survives as muscle-memory alias for the profile toggle.
