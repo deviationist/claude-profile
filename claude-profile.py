@@ -1571,18 +1571,21 @@ def cmd_rotate(args):
     state = load_state()
     current = current_account_of(cfg, profile)
 
-    # Aging-refresh-token nudge: printed even under --quiet (rare, actionable —
-    # a parked account nearing refresh expiry means a forced re-login later).
-    for acct in accounts:
-        if acct == current:
-            continue
-        blob = read_parked_cred(acct)
-        health = refresh_health(blob) if blob else ""
-        if health:
-            print(
-                f"claude-profile: ⚠ account \"{acct}\": {health} — run `claude-profile auth {acct}`",
-                file=sys.stderr,
-            )
+    # Aging-refresh-token nudge — a parked account nearing refresh expiry means
+    # a forced re-login later. Suppressed under --quiet so it doesn't print on
+    # every `claude` launch (the wrapper's auto-rotate runs quiet); the daemon
+    # keeps parked tokens fresh anyway, and `status` still surfaces it.
+    if not args.quiet:
+        for acct in accounts:
+            if acct == current:
+                continue
+            blob = read_parked_cred(acct)
+            health = refresh_health(blob) if blob else ""
+            if health:
+                print(
+                    f"claude-profile: ⚠ account \"{acct}\": {health} — run `claude-profile auth {acct}`",
+                    file=sys.stderr,
+                )
 
     if current is None:
         if not args.quiet:
