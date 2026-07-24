@@ -115,7 +115,7 @@ transparent passthrough everywhere). `\claude` bypasses it entirely.
 ### CLI
 
 ```
-claude-profile                     status: profiles, accounts, usage, toggles
+claude-profile                     status: profiles, accounts, token expiry, usage, toggles
                                    (also lists saved-but-unconfigured accounts)
 claude-profile status --usage      …with fresh usage from the API
 claude-profile use [<name>|default]   toggle the active profile (fzf picker w/o name)
