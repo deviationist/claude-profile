@@ -22,6 +22,27 @@ Two composable modes:
 The modes nest: a work machine can run a `work` profile plus a `personal`
 profile whose two Max subscriptions rotate serially inside it.
 
+## Why
+
+- **Run out of quota, keep working.** Hit the rate limit on one Max plan, flip
+  to another, `claude --resume`, carry on — same session, same context.
+- **Your setup comes with you.** A swap changes *only* the OAuth token. Memory,
+  sessions, settings, MCP servers, per-project trust all persist bit-for-bit.
+- **Hands-off rotation.** `auto` mode rotates off an exhausted account at launch;
+  exhaustion is read from Claude's own usage endpoint, and a launch is never
+  blocked on a guess.
+- **Spend credits before you switch.** `exhaust_credits` burns an account's
+  overage credits first and rotates only when they're near-spent — no paid
+  credits left on the table.
+- **Work and personal, cleanly split.** Separate config dirs auto-selected by
+  directory — and serial accounts nest *inside* each, so both axes compose.
+- **Doesn't age out on you.** A launchd/systemd keep-alive daemon renews parked
+  refresh tokens before they expire (per-account opt-out, email-on-failure).
+- **Invisible until you need it.** No config, or the default `~/.claude`? The
+  wrapper is a byte-identical passthrough. `\claude` bypasses it entirely.
+- **Nothing to break, nothing to lose.** Secrets never hit argv; worst case
+  (Claude changes internals) is a plain `/login` — the config dir is never at risk.
+
 > Works on **macOS and Linux**. The credential store is platform-specific:
 > the macOS login Keychain, or on Linux the `.credentials.json` files Claude
 > Code itself uses (live: `<dir>/.credentials.json`; parked: mode-0600 files
