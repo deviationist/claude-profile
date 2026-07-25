@@ -89,6 +89,41 @@ Open questions: driven by its own timer or by the opener's daemon loop; whether
 to consult a balance gate per account before spending; whether `rotate`/`auto`
 should factor "window currently open" into the target it picks.
 
+## Auto-rotate fails silently under concurrent sessions
+
+Launch-time auto-rotate (`rotate --if-exhausted --quiet` in the wrapper) refuses
+to swap while **any** live session runs out of the config dir — the correct
+"never swap the OAuth credential out from under a running session" invariant
+(`cmd_rotate` → `live_sessions(d)` guard). But for anyone who runs concurrent
+sessions in `~/.claude`, this means: the live account exhausts, you relaunch,
+`live_sessions()` still sees your *other* open session, and the swap is skipped.
+The relaunched session comes back up on the still-exhausted account. The block
+prints one stderr line, but Claude Code's TUI clears the screen immediately, so
+it's invisible — it just looks like nothing happened, and you rotate by hand
+(observed 2026-07-25: max5x at 5h 100%, max20x at 4%, 2 live sessions, restart
+didn't rotate, manual swap needed).
+
+Fix: make the blocked rotation **self-heal** instead of silently dropping it.
+
+1. When `cmd_rotate` detects exhaustion but bails on the live-session guard,
+   persist a **"rotation pending"** marker to state (target account + reason +
+   timestamp), rather than only warning to stderr.
+2. On every subsequent launch, the wrapper's rotate step checks the marker
+   first: if a pending rotation exists **and** `live_sessions(d)` is now empty,
+   apply it under `mutation_lock()` and clear the marker — so it fires the moment
+   the last blocking session closes, with no operator action.
+3. Clear/refresh the marker if the pending target itself has since exhausted, or
+   the once-exhausted account recovered (window reset) — don't act on a stale
+   decision.
+
+Secondary (cheap, do alongside): surface the pending/blocked state where it's
+actually visible — a `status` line and/or a statusline flag — since the stderr
+warning is eaten by the TUI.
+
+Open questions: whether a pending marker should also be honored by an explicit
+`claude-profile rotate` (probably yes) vs. only the launch path; interaction with
+`--force` (force should just clear any marker after swapping).
+
 ## Done
 
 - **Linux credential backend** — serial accounts / keep-alive work on Linux
