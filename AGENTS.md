@@ -34,7 +34,14 @@ python3 stdlib):
   client → harvest login → park → wipe scratch; live profiles untouched;
   rejects a mismatched login), `delete <name>` (remove an
   account's parked credential + snapshot — reverts save/auth),
-  `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`.
+  `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`,
+  `usage-json [--all|--profile P|--account A]` (porcelain for
+  `claude-usage --all`: emits `<account>\t<compact-raw-usage-json>` per line,
+  empty field = unavailable; `account_usage_raw()` refreshes an expired *parked*
+  access token in place first — under the mutation lock, via `refresh_account` —
+  so parked accounts stay renderable; **never touches a live credential**, so a
+  live account with an idle-expired token comes back empty until Claude Code
+  refreshes it).
   Per-profile **`exhaust_credits`** (config, default false): when true, a
   rate-limited account isn't "exhausted" for rotation while it still has
   extra-usage credits (`credits_available()` off `usage.extra_usage`; near-cap
