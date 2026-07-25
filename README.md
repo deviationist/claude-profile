@@ -42,7 +42,9 @@ cp ~/code/claude-profile/.env.example ~/code/claude-profile/.env   # optional kn
 Requirements: zsh, python3 (stdlib only). Credential store: the macOS Keychain
 (uses `security`) or, on Linux, files — nothing extra to install on either.
 Optional: `fzf` (interactive pickers), [`claude-usage`](https://github.com/deviationist/claude-usage)
-(statusline integration — auto-routed per profile).
+(statusline integration — auto-routed per profile; and its `--all` renders a
+themed usage bar for **every** account here via the `usage-json` porcelain,
+which refreshes parked tokens so their usage stays visible).
 
 ## Configure
 
@@ -150,6 +152,8 @@ claude-profile delete [<name>]     delete an account's parked credential +
 claude-profile rotate [--dry-run]  switch to the next non-exhausted account
 claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
+claude-profile usage-json [--all|--profile P|--account A]   raw usage JSON per
+                                   account (porcelain for `claude-usage --all`)
 claude-profile keepalive [<account>] [on|off]  per-account keep-alive toggle (no args = report)
 claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
 claude-profile daemon install [--jitter N]|uninstall|status   keep-alive daemon (launchd/systemd)
