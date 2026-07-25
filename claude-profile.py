@@ -721,6 +721,66 @@ def account_credits(state, account):
     return ((state.get("usage") or {}).get(account) or {}).get("credits_available")
 
 
+def _raw_usage_cache_path(name):
+    return os.path.join(STATE_DIR, "usage-raw", f"{name}.json")
+
+
+def account_usage_raw(cfg, name, refresh_if_expired=True, ttl=USAGE_TTL):
+    """The RAW usage-endpoint JSON for one account (live or parked) — the full
+    server response, not the summarized `limits` cache. Powers the `usage-json`
+    porcelain that `claude-usage --all` renders with its own bars/themes.
+
+    For a parked account whose *access* token has expired (they lapse in hours,
+    while the keep-alive daemon only tracks the multi-day *refresh* token), this
+    refreshes the token pair in place first — under the mutation lock, via the
+    same grant the daemon uses — so parked accounts stay renderable rather than
+    blanking out. Never touches a live account's credential (that's Claude
+    Code's to refresh).
+
+    Stale-while-revalidate, mirroring bare claude-usage's own cache: a cache
+    younger than `ttl` is served without a fetch, and a fetch that is impossible
+    or rejected (a live account's token lapses between Claude Code sessions;
+    rate limiting) never clobbers the last-known-good — it's served stale
+    instead. So `--all` keeps showing an account's numbers through a transient
+    token failure, exactly like `claude-usage`. Returns the response dict, or
+    None only when there is nothing cached and no fresh fetch."""
+    cached = None
+    try:
+        with open(_raw_usage_cache_path(name)) as fh:
+            cached = json.load(fh)
+    except (OSError, ValueError):
+        cached = None
+    if cached and (time.time() - cached.get("checked_at", 0)) < ttl:
+        return cached.get("data")
+
+    profile = next(
+        (p for p in cfg["profiles"] if name in profile_accounts(cfg, p)), None
+    )
+    live = profile is not None and current_account_of(cfg, profile) == name
+    blob = read_live_cred(profile_dir(cfg, profile)) if live else None
+    if blob is None:
+        blob = read_parked_cred(name)
+    token = token_from_blob(blob) if blob else None
+    if token is None and not live and refresh_if_expired:
+        # Parked + expired access token → refresh in place, then re-read. The
+        # gate inside refresh_account still declines a doomed grant (expired
+        # refresh token) and never touches a live account.
+        with mutation_lock():
+            refresh_account(cfg, name, min_days_left=0, force=True, quiet=True)
+        blob = read_parked_cred(name)
+        token = token_from_blob(blob) if blob else None
+
+    data = fetch_usage(token) if token else None
+    if data is not None:
+        atomic_write(
+            _raw_usage_cache_path(name),
+            json.dumps({"checked_at": time.time(), "data": data}),
+        )
+        return data
+    # Fetch impossible or rejected → serve the last-known-good, if any.
+    return cached.get("data") if cached else None
+
+
 # ── mutation lock ───────────────────────────────────────────────────────────
 
 import contextlib
@@ -1688,6 +1748,31 @@ def cmd_usage(args):
         print(f"{acct}: {fmt_limits(limits)}")
 
 
+def cmd_usage_json(args):
+    """Porcelain for `claude-usage --all`: one line per account, tab-separated
+    `<account>\\t<compact-raw-usage-json>`. An empty JSON field means the
+    account was attempted but its usage is unavailable (no token / offline).
+    Parked accounts get an in-place token refresh first (see account_usage_raw),
+    so this is the reliable path — unlike a consumer reading the Keychain itself,
+    which can't refresh an expired parked token."""
+    cfg = load_config()
+    if args.account:
+        names = [args.account]
+    elif args.all:
+        names = sorted(
+            {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
+        )
+    else:
+        names = profile_accounts(cfg, pick_profile(cfg, args))
+    for name in names:
+        data = account_usage_raw(cfg, name, ttl=0 if args.fresh else USAGE_TTL)
+        if data is None:
+            print(f"{name}\t")
+            print(f"{name}: usage unavailable", file=sys.stderr)
+        else:
+            print(f"{name}\t{json.dumps(data, separators=(',', ':'))}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="claude-profile", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
@@ -1807,6 +1892,16 @@ def main():
     p.add_argument("--profile")
     p.add_argument("--fresh", action="store_true")
     p.set_defaults(func=cmd_usage)
+
+    p = sub.add_parser(
+        "usage-json",
+        help="raw usage JSON per account (porcelain for `claude-usage --all`)",
+    )
+    p.add_argument("--profile")
+    p.add_argument("--account", help="a single account")
+    p.add_argument("--all", action="store_true", help="every account across all profiles")
+    p.add_argument("--fresh", action="store_true", help="accepted for symmetry (raw fetch is always live)")
+    p.set_defaults(func=cmd_usage_json)
 
     args = ap.parse_args()
     if not args.cmd:
