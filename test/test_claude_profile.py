@@ -54,6 +54,15 @@ def oauth_blob(days_left=30, refresh="r", access="a"):
     return json.dumps({"claudeAiOauth": o})
 
 
+def expired_blob(refresh="r"):
+    """A blob whose ACCESS token has already expired (refresh token still good) —
+    the parked-account state account_usage_raw refreshes past."""
+    now = int(cp.time.time() * 1000)
+    o = {"accessToken": "old", "expiresAt": now - 1000,
+         "refreshToken": refresh, "refreshTokenExpiresAt": now + 30 * 86400 * 1000}
+    return json.dumps({"claudeAiOauth": o})
+
+
 # ── Linux (file) credential backend ─────────────────────────────────────────
 class LinuxCredentialStore(unittest.TestCase):
     def setUp(self):
@@ -406,6 +415,112 @@ class RefreshHealth(unittest.TestCase):
 
     def test_expired(self):
         self.assertIn("EXPIRED", cp.refresh_health(oauth_blob(days_left=-1)))
+
+
+# ── account_usage_raw (raw usage JSON, parked-token refresh) ────────────────
+class AccountUsageRaw(unittest.TestCase):
+    def setUp(self):
+        self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["live", "parked"]}}}
+        self._st = cp.STATE_DIR
+        cp.STATE_DIR = tempfile.mkdtemp()                  # isolate the raw-usage cache
+        self._orig = {n: getattr(cp, n) for n in
+                      ("current_account_of", "read_live_cred", "read_parked_cred",
+                       "fetch_usage", "refresh_account", "mutation_lock", "profile_dir")}
+        cp.current_account_of = lambda cfg, prof: "live"   # "live" is live, "parked" isn't
+        cp.profile_dir = lambda cfg, prof: "/x"
+        cp.fetch_usage = lambda tok: {"ok": tok}           # echo the token actually used
+        cp.mutation_lock = lambda: contextlib.nullcontext()
+
+    def tearDown(self):
+        shutil.rmtree(cp.STATE_DIR, ignore_errors=True)
+        cp.STATE_DIR = self._st
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    def test_live_valid_token_fetches_without_refresh(self):
+        cp.read_live_cred = lambda d: oauth_blob(access="A")
+        cp.read_parked_cred = lambda n: None
+        seen = {"refresh": 0}
+        cp.refresh_account = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
+        self.assertEqual(cp.account_usage_raw(self.cfg, "live"), {"ok": "A"})
+        self.assertEqual(seen["refresh"], 0)               # a live account is never refreshed
+
+    def test_parked_expired_refreshes_then_fetches(self):
+        st = {"blob": expired_blob()}
+        cp.read_live_cred = lambda d: None
+        cp.read_parked_cred = lambda n: st["blob"]
+        def fake_refresh(cfg, name, min_days_left, force, quiet):
+            st["blob"] = oauth_blob(access="FRESH")        # simulate a successful grant
+        cp.refresh_account = fake_refresh
+        self.assertEqual(cp.account_usage_raw(self.cfg, "parked"), {"ok": "FRESH"})
+
+    def test_parked_refresh_fails_returns_none(self):
+        cp.read_live_cred = lambda d: None
+        cp.read_parked_cred = lambda n: expired_blob()     # stays expired even after refresh
+        cp.refresh_account = lambda *a, **k: None
+        self.assertIsNone(cp.account_usage_raw(self.cfg, "parked"))
+
+    def test_live_expired_returns_none_never_refreshes(self):
+        cp.read_live_cred = lambda d: expired_blob()
+        cp.read_parked_cred = lambda n: None
+        seen = {"refresh": 0}
+        cp.refresh_account = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
+        self.assertIsNone(cp.account_usage_raw(self.cfg, "live"))
+        self.assertEqual(seen["refresh"], 0)               # invariant: live creds untouched
+
+    def test_stale_cache_served_on_fetch_failure(self):
+        # 1st call succeeds and populates the cache.
+        cp.read_live_cred = lambda d: oauth_blob(access="A")
+        cp.read_parked_cred = lambda n: None
+        self.assertEqual(cp.account_usage_raw(self.cfg, "live", ttl=0), {"ok": "A"})
+        # Now the fetch breaks (rate limit / token lapse); ttl=0 forces a re-fetch
+        # attempt, which fails → the last-known-good must be served, not None.
+        cp.fetch_usage = lambda tok: None
+        self.assertEqual(cp.account_usage_raw(self.cfg, "live", ttl=0), {"ok": "A"})
+
+    def test_fresh_cache_short_circuits_fetch(self):
+        cp.read_live_cred = lambda d: oauth_blob(access="A")
+        cp.read_parked_cred = lambda n: None
+        self.assertEqual(cp.account_usage_raw(self.cfg, "live"), {"ok": "A"})
+        # Within ttl, a second call serves cache without touching the token path.
+        cp.read_live_cred = lambda d: (_ for _ in ()).throw(AssertionError("refetched"))
+        self.assertEqual(cp.account_usage_raw(self.cfg, "live"), {"ok": "A"})
+
+
+# ── usage-json porcelain (consumed by `claude-usage --all`) ─────────────────
+class CmdUsageJson(unittest.TestCase):
+    def setUp(self):
+        self._orig = {n: getattr(cp, n) for n in ("load_config", "account_usage_raw", "pick_profile")}
+        cp.load_config = lambda **k: {"profiles": {
+            "p1": {"dir": "~/.claude", "accounts": ["a", "b"]},
+            "p2": {"dir": "~/x", "accounts": ["c"]}}}
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    def _run(self, **kw):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            cp.cmd_usage_json(ns(**{"account": None, "all": False, "profile": None, "fresh": False, **kw}))
+        return buf.getvalue().rstrip("\n").split("\n")
+
+    def test_all_sorted_with_gap(self):
+        cp.account_usage_raw = lambda cfg, name, ttl=None: ({"who": name} if name != "b" else None)
+        lines = self._run(all=True)
+        self.assertEqual(lines[0], 'a\t{"who":"a"}')       # compact JSON, no spaces
+        self.assertEqual(lines[1], 'b\t')                   # unavailable → empty field
+        self.assertEqual(lines[2], 'c\t{"who":"c"}')       # every profile's accounts, sorted
+
+    def test_single_account(self):
+        cp.account_usage_raw = lambda cfg, name, ttl=None: {"who": name}
+        self.assertEqual(self._run(account="c"), ['c\t{"who":"c"}'])
+
+    def test_default_profile_scope(self):
+        cp.pick_profile = lambda cfg, args: "p1"
+        cp.account_usage_raw = lambda cfg, name, ttl=None: {"n": name}
+        names = [l.split("\t")[0] for l in self._run()]
+        self.assertEqual(names, ["a", "b"])                 # just the resolved profile
 
 
 if __name__ == "__main__":
