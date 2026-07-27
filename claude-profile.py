@@ -63,6 +63,7 @@ _OAUTH_ENV = {
     "token_url": "CLAUDE_PROFILE_TOKEN_URL",
     "usage_url": "CLAUDE_PROFILE_USAGE_URL",
     "user_agent": "CLAUDE_PROFILE_UA",
+    "messages_url": "CLAUDE_PROFILE_MESSAGES_URL",
 }
 
 
@@ -112,6 +113,58 @@ def curl_json(url, body=None, bearer=None):
     except json.JSONDecodeError:
         data = None
     return status, data, raw[:200]
+
+
+# The Claude Code identity the subscription OAuth token is only accepted under on
+# /v1/messages: system[0] must be EXACTLY this string, paired with the
+# oauth-2025-04-20 beta header curl_json already sends. Same spoof Claude Code
+# itself presents. Reverse-engineered, not a supported API — may change.
+CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+DEFAULT_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_ANCHOR_MODEL = "claude-haiku-4-5-20251001"  # concrete id (not the CLI alias)
+
+
+def anchor_messages(token, model, prompt, max_tokens):
+    """Fire ONE POST /v1/messages spoofing Claude Code, to anchor a 5-hour
+    window. The bearer token travels on stdin (never argv/disk, per house rule);
+    the request body is not a secret, so it rides in argv. Returns
+    (status:int, stop_reason:str|None, err:str)."""
+    url = oauth_setting("messages_url") or DEFAULT_MESSAGES_URL
+    body = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": [{"type": "text", "text": CLAUDE_CODE_IDENTITY}],
+        "messages": [{"role": "user", "content": prompt}],
+    })
+    cmd = [
+        "curl", "-sS", "--connect-timeout", "5", "--max-time", "30",
+        "-H", "Accept: application/json",
+        "-H", "anthropic-beta: oauth-2025-04-20",
+        "-H", "anthropic-version: 2023-06-01",
+        "-H", "Content-Type: application/json",
+        "-X", "POST", "--data-binary", body,
+        "-H", "@-",                      # Authorization: Bearer … from stdin
+        "-w", "\n%{http_code}", url,
+    ]
+    ua = oauth_setting("user_agent")
+    if ua:
+        cmd += ["-H", f"User-Agent: {ua}"]
+    res = subprocess.run(cmd, input=f"Authorization: Bearer {token}",
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        return 0, None, (res.stderr.strip().splitlines() or ["curl failed"])[-1][:200]
+    raw, _, code = res.stdout.rpartition("\n")
+    status = int(code) if code.strip().isdigit() else 0
+    stop, err = None, ""
+    try:
+        d = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        d, err = None, raw[:200]
+    if isinstance(d, dict):
+        stop = d.get("stop_reason")
+        if d.get("type") == "error":
+            err = ((d.get("error") or {}).get("message") or "")[:200]
+    return status, stop, err
 
 # Flat (non-account-keyed) caches in .claude.json that hold single-account
 # values; cleared on swap so they regenerate for the incoming account.
@@ -725,6 +778,34 @@ def _raw_usage_cache_path(name):
     return os.path.join(STATE_DIR, "usage-raw", f"{name}.json")
 
 
+def account_access_token(cfg, name, refresh_if_expired=True):
+    """A usable *access* token for one account (live or parked), plus whether it
+    is the live account. The live account reads the live credential (Claude
+    Code's to refresh — never touched here); a parked account reads its parked
+    pair, and an expired parked access token is refreshed in place first under
+    the mutation lock (the same grant the daemon uses; the gate inside
+    refresh_account still declines a doomed grant). Returns (token|None,
+    is_live:bool) — None means unavailable (offline, a dead refresh token, or a
+    live account whose token lapsed between Claude Code sessions)."""
+    profile = next(
+        (p for p in cfg["profiles"] if name in profile_accounts(cfg, p)), None
+    )
+    live = profile is not None and current_account_of(cfg, profile) == name
+    blob = read_live_cred(profile_dir(cfg, profile)) if live else None
+    if blob is None:
+        blob = read_parked_cred(name)
+    token = token_from_blob(blob) if blob else None
+    if token is None and not live and refresh_if_expired:
+        # Parked + expired access token → refresh in place, then re-read. The
+        # gate inside refresh_account still declines a doomed grant (expired
+        # refresh token) and never touches a live account.
+        with mutation_lock():
+            refresh_account(cfg, name, min_days_left=0, force=True, quiet=True)
+        blob = read_parked_cred(name)
+        token = token_from_blob(blob) if blob else None
+    return token, live
+
+
 def account_usage_raw(cfg, name, refresh_if_expired=True, ttl=USAGE_TTL):
     """The RAW usage-endpoint JSON for one account (live or parked) — the full
     server response, not the summarized `limits` cache. Powers the `usage-json`
@@ -753,23 +834,7 @@ def account_usage_raw(cfg, name, refresh_if_expired=True, ttl=USAGE_TTL):
     if cached and (time.time() - cached.get("checked_at", 0)) < ttl:
         return cached.get("data")
 
-    profile = next(
-        (p for p in cfg["profiles"] if name in profile_accounts(cfg, p)), None
-    )
-    live = profile is not None and current_account_of(cfg, profile) == name
-    blob = read_live_cred(profile_dir(cfg, profile)) if live else None
-    if blob is None:
-        blob = read_parked_cred(name)
-    token = token_from_blob(blob) if blob else None
-    if token is None and not live and refresh_if_expired:
-        # Parked + expired access token → refresh in place, then re-read. The
-        # gate inside refresh_account still declines a doomed grant (expired
-        # refresh token) and never touches a live account.
-        with mutation_lock():
-            refresh_account(cfg, name, min_days_left=0, force=True, quiet=True)
-        blob = read_parked_cred(name)
-        token = token_from_blob(blob) if blob else None
-
+    token, _live = account_access_token(cfg, name, refresh_if_expired)
     data = fetch_usage(token) if token else None
     if data is not None:
         atomic_write(
@@ -1773,6 +1838,50 @@ def cmd_usage_json(args):
             print(f"{name}\t{json.dumps(data, separators=(',', ':'))}")
 
 
+def cmd_anchor_window(args):
+    """Anchor a Claude 5-hour usage window for one or more accounts by firing a
+    single POST /v1/messages with each account's token — no session launch, no
+    live-credential swap. This is the ONLY way to anchor a *parked* serial
+    account's window (a real `claude` launch would use whatever account is live
+    in the dir, never a parked one). Fires unconditionally (like a --run); the
+    caller decides whether a window is already open. One porcelain line per
+    account, tab-separated:
+        <account>\\t<anchored|error>\\t<http_status>\\t<live|parked>\\t<detail>
+    detail = stop_reason on success, else a short error (never a token/secret).
+    Exit 0 iff every targeted account anchored."""
+    cfg = load_config()
+    if args.account:
+        names = [args.account]
+    elif args.all:
+        names = sorted(
+            {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
+        )
+    else:
+        names = profile_accounts(cfg, pick_profile(cfg, args))
+    rc = 0
+    for name in names:
+        token, live = account_access_token(cfg, name)
+        scope = "live" if live else "parked"
+        if not token:
+            detail = ("live token lapsed — let Claude Code refresh it" if live
+                      else "no usable token (refresh token dead? re-auth)")
+            print(f"{name}\terror\t\t{scope}\t{detail}")
+            print(f"claude-profile: anchor-window {name}: {detail}", file=sys.stderr)
+            rc = 1
+            continue
+        status, stop, err = anchor_messages(
+            token, args.model, args.prompt, args.max_tokens
+        )
+        if status == 200 and stop:
+            print(f"{name}\tanchored\t200\t{scope}\t{stop}")
+        else:
+            print(f"{name}\terror\t{status}\t{scope}\t{err or 'no completion'}")
+            print(f"claude-profile: anchor-window {name}: HTTP {status} {err}",
+                  file=sys.stderr)
+            rc = 1
+    sys.exit(rc)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="claude-profile", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
@@ -1902,6 +2011,19 @@ def main():
     p.add_argument("--all", action="store_true", help="every account across all profiles")
     p.add_argument("--fresh", action="store_true", help="accepted for symmetry (raw fetch is always live)")
     p.set_defaults(func=cmd_usage_json)
+
+    p = sub.add_parser(
+        "anchor-window",
+        help="anchor a 5-hour window per account via one POST /v1/messages (serial-safe; no session/swap)",
+    )
+    p.add_argument("--profile")
+    p.add_argument("--account", help="a single account")
+    p.add_argument("--all", action="store_true", help="every account across all profiles")
+    p.add_argument("--model", default=DEFAULT_ANCHOR_MODEL,
+                   help=f"concrete API model id (default {DEFAULT_ANCHOR_MODEL}; the CLI 'haiku' alias is NOT valid on the API)")
+    p.add_argument("--prompt", default="Reply with exactly: OK.")
+    p.add_argument("--max-tokens", type=int, default=16, dest="max_tokens")
+    p.set_defaults(func=cmd_anchor_window)
 
     args = ap.parse_args()
     if not args.cmd:
