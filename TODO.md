@@ -57,37 +57,35 @@ guard + `--force` kill, `oauth_setting` resolution, `claude_json_path`,
   `accountUuid`) and the swap-time `claude-usage --fresh` trigger in the
   `claude-profile` wrapper.
 
-## Parked accounts' 5-hour windows go unkept
+## ~~Parked accounts' 5-hour windows go unkept~~ — DONE (2026-07-27)
 
-Keep-alive renews parked accounts' **refresh tokens**, but nothing keeps their
-**5-hour usage windows** open. Only the live account's window gets anchored, by
-whatever runs against the profile dir — e.g.
-[claude-auto-window](https://github.com/deviationist/claude-auto-window), whose
-profile model is one config dir ⇒ one account, so parked accounts are invisible
-to it. Net effect: swap to a parked account after a quiet stretch and you land on
-a closed window, having forfeited hours of allowance you were entitled to. The
-serial model is what creates the gap — the two tools are each correct alone.
+**Solved by the `anchor-window` subcommand** (+ its orchestration in
+[claude-auto-window](https://github.com/deviationist/claude-auto-window) v1.3.0,
+which discovers accounts from this config and delegates the per-account anchor
+here). Parked accounts' 5-hour windows are now kept open continuously.
 
-No swap is needed to fix it: a window is a property of the **account**, not the
-config dir, and `account_usage()` already proves a parked credential works
-headlessly. Sketch of a `keepwindow <account>` subcommand:
+The problem was real — keep-alive renews **refresh tokens**, but nothing kept the
+**5-hour usage windows** open, and claude-auto-window's one-dir-⇒-one-account
+model left parked accounts invisible, so swapping to one after a quiet stretch
+landed on a closed window.
 
-1. take `mutation_lock()`
-2. materialize the parked blob into a scratch config dir — the parked file is
-   already byte-compatible with `.credentials.json`
-3. run the window-opener against it (`claude-auto-window --run --config-dir
-   <scratch>`). Reuse it rather than reimplementing the starter: opening a window
-   requires a **real interactive session**, `claude -p` does not open one
-4. **re-park the rotated credential**, then remove the scratch dir
+The fix turned out **cleaner than the sketched `keepwindow`** (scratch-dir +
+interactive `claude --run` + re-park the rotated pair): `anchor-window` instead
+fires a single `POST /v1/messages` with the account's **access** token (Claude
+Code identity spoof), which anchors the window with **no session, no scratch dir,
+no swap, and no refresh-token rotation** in the common case — so the load-bearing
+"step 4 re-park" concern mostly evaporates. `account_access_token()` (extracted
+from `account_usage_raw`) resolves the token — live cred, else parked, refreshing
+an expired *parked* token in place under `mutation_lock()` (via `refresh_account`,
+re-parked in place); the token rides on curl stdin, never argv/disk. So
+**`claude-profile` remains the single writer** of the credential store — the
+invariant this section insisted on is preserved.
 
-Step 4 is load-bearing. `refresh_account()` shows the refresh token rotates on
-use, so a real launch against the scratch dir rotates the pair — skip the
-write-back and the parked copy is dead, and the next `account` swap installs a
-stale token. `claude-profile` must remain the single writer.
-
-Open questions: driven by its own timer or by the opener's daemon loop; whether
-to consult a balance gate per account before spending; whether `rotate`/`auto`
-should factor "window currently open" into the target it picks.
+The open questions resolved as: driven by **the opener's daemon loop** (not a
+timer here) — claude-auto-window owns cadence, balance-gating, breaker, and the
+"window already open?" check per account; `anchor-window` fires unconditionally
+when asked. `rotate`/`auto` were left as-is (window-keeping is now independent of
+which account is live).
 
 ## Auto-rotate fails silently under concurrent sessions
 
