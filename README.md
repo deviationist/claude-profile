@@ -154,6 +154,9 @@ claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
 claude-profile usage-json [--all|--profile P|--account A]   raw usage JSON per
                                    account (porcelain for `claude-usage --all`)
+claude-profile anchor-window [--all|--profile P|--account A]   anchor a 5-hour
+                                   window per account via one POST /v1/messages
+                                   (serial-safe; no session/swap — see below)
 claude-profile keepalive [<account>] [on|off]  per-account keep-alive toggle (no args = report)
 claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
 claude-profile daemon install [--jitter N]|uninstall|status   keep-alive daemon (launchd/systemd)
@@ -239,6 +242,55 @@ The account's recorded email is pre-filled on the sign-in page; override with
 doesn't match the account's recorded identity is rejected (`--force` overrides;
 `--no-launch` re-harvests a kept scratch login). If the focused sign-in ever
 misbehaves, `--tui` falls back to the full interactive client.
+
+## Keeping every account's window open (`anchor-window`)
+
+Claude Pro/Max plans anchor a **5-hour usage window** at the first request; when
+it lapses there's a cold-start wait. Keeping it open back-to-back means firing one
+trivial request per window. For **serial accounts** that's normally impossible
+without rotating: a real `claude` launch always uses whichever account is *live*
+in the dir, so a **parked** account's window can never be anchored that way — and
+you can't rotate under a live session.
+
+`anchor-window` solves this. It fires a single `POST /v1/messages` carrying a
+given account's own token (spoofing the Claude Code identity so the subscription
+token is accepted), anchoring that account's window **without a session and
+without a swap**. Because claude-profile is the one component that can safely mint
+a fresh token for any account — live *or* parked, refreshing an expired parked
+token in place under the mutation lock — this lives here, and **the token never
+leaves the process** (it rides on stdin to `curl`, never argv/disk).
+
+```sh
+claude-profile anchor-window --all          # anchor every account, every profile
+claude-profile anchor-window --account max5x
+```
+
+Porcelain output, one tab-separated line per account:
+
+```
+<account>\t<anchored|error>\t<http_status>\t<live|parked>\t<detail>
+```
+
+`detail` is the `stop_reason` on success or a short error otherwise (never a
+token). Exit 0 iff every targeted account anchored. It fires **unconditionally**
+(like a `--run`) — the *decision* of whether a window is already open, whether the
+plan balance justifies firing, backoff, jitter, etc. belongs to the orchestrator.
+
+> **Orchestration:** [claude-auto-window](https://github.com/deviationist/claude-auto-window)
+> is that orchestrator. Pointed at this repo it discovers your accounts, applies
+> its window-check / balance-gate / circuit-breaker / cadence logic *per account*,
+> and delegates the actual anchor here — keeping **all** your subscriptions'
+> windows open continuously (parked included). Distinct from keep-alive (below):
+> keep-alive renews multi-day **refresh tokens** so accounts don't die;
+> anchor-window opens the **5-hour usage window**. Complementary.
+
+`--model` sets the concrete API model id (default a cheap Haiku id — the CLI
+`haiku` *alias* is not valid on the API); config `oauth.messages_url` /
+`CLAUDE_PROFILE_MESSAGES_URL` overrides the endpoint. Like usage/refresh it needs
+the [OAuth constants](#oauth-constants) (the User-Agent especially — Cloudflare
+rejects the default). **This is an unofficial spoof, not a supported API
+surface**, and could change; the orchestrator degrades gracefully if it starts
+being rejected.
 
 ## How serial switching works
 

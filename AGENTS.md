@@ -42,6 +42,17 @@ python3 stdlib):
   so parked accounts stay renderable; **never touches a live credential**, so a
   live account with an idle-expired token comes back empty until Claude Code
   refreshes it).
+  `anchor-window [--all|--profile P|--account A] [--model ID] [--prompt T]
+  [--max-tokens N]` anchors a 5-hour usage window per account by firing ONE
+  POST /v1/messages with that account's token (Claude Code identity spoof +
+  oauth-2025-04-20 beta header), no session launch and no live swap — the only way
+  to anchor a *parked* serial account's window. Token resolution reuses
+  `account_access_token()` (extracted from `account_usage_raw`: live cred, else
+  parked, refresh-parked-under-lock); the token rides on curl stdin (never argv/
+  disk). Fires unconditionally (gating belongs to the orchestrator,
+  claude-auto-window). Porcelain: `<account>\t<anchored|error>\t<http>\t<live|
+  parked>\t<detail>` per line, exit 0 iff all anchored. Unofficial spoof — may be
+  rejected if Anthropic changes the rule.
   Per-profile **`exhaust_credits`** (config, default false): when true, a
   rate-limited account isn't "exhausted" for rotation while it still has
   extra-usage credits (`credits_available()` off `usage.extra_usage`; near-cap
