@@ -3,13 +3,16 @@
 ## Test coverage
 
 A committed stdlib `unittest` suite now lives at `test/test_claude_profile.py`
-(47 tests, run via `python3 test/test_claude_profile.py`), wired to CI in
+(63 tests, run via `python3 test/test_claude_profile.py`), wired to CI in
 `.github/workflows/test.yml`. It stubs the network + Keychain and exercises the
 Linux file backend directly. **Covered so far:** credential store (file backend
 round-trip / 0600 / listing / delete), `refresh_gate` decisions, `credits_
 available` + `exhaust_credits` rotation, `toggle` selection, `ensure_swappable`
 guard + `--force` kill, `oauth_setting` resolution, `claude_json_path`,
-`is_exhausted`/`summarize_usage`, and the `security`-absent degrade.
+`is_exhausted`/`summarize_usage`, the swap readiness preflight
+(`ensure_account_ready`: non-interactive hint, prompt accept/decline, ordering
+vs. the session guard, wrong-account capture discard), and the
+`security`-absent degrade.
 
 ### Still to add
 

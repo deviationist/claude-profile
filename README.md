@@ -104,6 +104,21 @@ items (`claude-profile-parked-<name>`), never on disk; on **Linux**,
 mode-0600 files under the state dir (`parked/<name>.json`) — the same
 protection as Claude Code's own `.credentials.json`.
 
+A saved account is therefore **two** artifacts, and a swap needs both:
+
+| Artifact | Where | Holds |
+|---|---|---|
+| parked credential | Keychain `claude-profile-parked-<name>` (macOS) / 0600 file (Linux) | the OAuth access + refresh token pair |
+| snapshot | `accounts/<name>.json` in the state dir | `accountUuid`, `oauthAccount`, `userID`, `savedAt` |
+
+"Parked" means *set aside while another account is live*: exactly one account
+at a time owns the dir's live credential (the item Claude Code actually reads),
+and the rest wait parked. The snapshot is what a swap writes into
+`.claude.json` so Claude Code knows *which* account the incoming token belongs
+to — a token alone doesn't say. `status` reports an account with only one of
+the two as `UNSAVED`; the swap preflight names the missing half and offers to
+re-run `auth`, which rewrites both.
+
 ### OAuth constants
 
 The keep-alive `refresh` and per-account `usage` features talk to Claude
@@ -143,7 +158,8 @@ claude-profile status --usage      …with fresh usage from the API
 claude-profile use [<name>|default]   toggle the active profile (fzf picker w/o name)
 claude-profile account [<name>]    swap the live account (serial; fzf picker w/o name)
 claude-profile toggle              switch to the NEXT account (flips between two)
-                                   (account/toggle take --force = kill live sessions first)
+                                   (account/toggle take --force = kill live sessions first;
+                                    an unauthenticated target prompts to `auth` it inline)
 claude-profile save <name>         park the dir's current login as account <name>
 claude-profile auth [<name>]       re-authenticate an account via a throwaway
                                    config dir — live profiles untouched
@@ -303,6 +319,14 @@ A Claude Code subscription lives in exactly two places:
 
 Nothing else in the config dir is account-bound. A swap:
 
+0. **checks the target is actually parked** — an account that was never
+   authenticated (or that `delete` removed) is nothing to swap *to*. Rather
+   than failing with an instruction, an interactive run offers to do the
+   `auth` flow inline and then continues. This runs **before** the live-session
+   guard below, deliberately: `auth` works in a scratch dir and needs no
+   sessions closed, so the fixable half of the problem gets fixed even when the
+   swap itself is still blocked. Non-interactive runs (scripts, the daemon)
+   print the exact `claude-profile auth <name>` line and exit,
 1. **refuses if live sessions** are running out of the dir (session registry
    + pid liveness) — swapping under a running process risks the old session
    clobbering the new tokens on refresh. `--force` **terminates those sessions

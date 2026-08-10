@@ -19,6 +19,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,7 +29,7 @@ def muted():
     """Swallow a command's normal stdout/stderr chatter during a test."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        yield
+        yield buf
 
 
 def load_module():
@@ -302,7 +303,7 @@ class Toggle(unittest.TestCase):
         self._orig = {n: getattr(cp, n) for n in
                       ("load_config", "pick_profile", "profile_dir", "load_state",
                        "save_state", "current_account_of", "ensure_swappable",
-                       "load_snapshot", "activate_account")}
+                       "load_snapshot", "activate_account", "read_parked_cred")}
         cp.load_config = lambda **k: {"profiles": {"p": {"dir": "~/.claude", "accounts": ["max20x", "max5x"]}}}
         cp.pick_profile = lambda cfg, a: "p"
         cp.profile_dir = lambda cfg, prof: "/x"
@@ -310,6 +311,7 @@ class Toggle(unittest.TestCase):
         cp.save_state = lambda s: None
         cp.ensure_swappable = lambda d, f: None
         cp.load_snapshot = lambda n: {"oauthAccount": {"emailAddress": n + "@x"}}
+        cp.read_parked_cred = lambda n: oauth_blob()
         cp.activate_account = lambda cfg, s, prof, target: self.saved.__setitem__("target", target)
 
     def tearDown(self):
@@ -333,6 +335,113 @@ class Toggle(unittest.TestCase):
 
     def test_unknown_current_starts_at_first(self):
         self.assertEqual(self._toggle_from(None), "max20x")
+
+
+# ── swap preflight: unparked target offers the auth flow ────────────────────
+class SwapPreflight(unittest.TestCase):
+    """`toggle`/`account` onto an account that was never authenticated."""
+
+    CFG = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["max20x", "max5x"]}}}
+
+    def setUp(self):
+        self._st = cp.STATE_DIR
+        cp.STATE_DIR = tempfile.mkdtemp()
+        # Canary: the redirect must actually cover snapshot paths. A frozen
+        # ACCOUNTS_DIR once let this class unlink the operator's real snapshot.
+        assert cp.snapshot_path("probe").startswith(cp.STATE_DIR), \
+            "STATE_DIR redirect does not cover snapshot_path — refusing to run"
+        self.calls = {}
+        self._orig = {n: getattr(cp, n) for n in
+                      ("load_config", "pick_profile", "profile_dir", "load_state",
+                       "save_state", "current_account_of", "ensure_swappable",
+                       "load_snapshot", "read_parked_cred", "delete_parked_cred",
+                       "activate_account", "auth_account", "interactive")}
+        cp.load_config = lambda **k: self.CFG
+        cp.pick_profile = lambda cfg, a: "p"
+        cp.profile_dir = lambda cfg, prof: "/x"
+        cp.load_state = lambda: {}
+        cp.save_state = lambda s: None
+        cp.current_account_of = lambda cfg, prof: "max20x"
+        # the session guard fires only if the preflight wrongly runs first
+        cp.ensure_swappable = lambda d, f: self.calls.__setitem__("guard", True)
+        cp.delete_parked_cred = lambda n: self.calls.__setitem__("deleted", n)
+        cp.activate_account = lambda cfg, s, prof, t: self.calls.__setitem__("target", t)
+        # max20x is live and parked; max5x has never been captured
+        self.snaps = {"max20x": {"accountUuid": "uuid-20x",
+                                 "oauthAccount": {"emailAddress": "a@x"}}}
+        cp.load_snapshot = lambda n: self.snaps.get(n)
+        cp.read_parked_cred = lambda n: oauth_blob() if n in self.snaps else None
+        cp.auth_account = self._fake_auth
+        self.auth_captures = "uuid-5x"
+
+    def _fake_auth(self, name, **kw):
+        """Stand-in for the login flow: parks whatever uuid the test dictates."""
+        self.calls["authed"] = name
+        self.snaps[name] = {"accountUuid": self.auth_captures,
+                            "oauthAccount": {"emailAddress": name + "@x"}}
+        return name + "@x"
+
+    def tearDown(self):
+        shutil.rmtree(cp.STATE_DIR, ignore_errors=True)
+        cp.STATE_DIR = self._st
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    def _toggle(self, answer=None):
+        """Run `toggle`; `answer` None = non-interactive, else the typed reply."""
+        cp.interactive = lambda: answer is not None
+        with mock.patch("builtins.input", lambda *a: answer or ""):
+            with muted() as buf:
+                try:
+                    cp.cmd_toggle(ns(profile=None, force=False))
+                    return None, buf.getvalue()
+                except SystemExit as e:
+                    return e.code, buf.getvalue()
+
+    def test_non_interactive_dies_with_auth_hint(self):
+        code, out = self._toggle()
+        self.assertEqual(code, 1)
+        self.assertIn("claude-profile auth max5x", out)
+        self.assertNotIn("target", self.calls)
+
+    def test_preflight_runs_before_the_session_guard(self):
+        # the readiness problem must surface without first demanding the
+        # operator close every session for a swap that cannot happen
+        self._toggle()
+        self.assertNotIn("guard", self.calls)
+
+    def test_declining_the_prompt_changes_nothing(self):
+        code, out = self._toggle(answer="n")
+        self.assertEqual(code, 1)
+        self.assertNotIn("authed", self.calls)
+        self.assertNotIn("target", self.calls)
+
+    def test_accepting_auths_then_swaps(self):
+        code, _ = self._toggle(answer="")  # bare Enter = default yes
+        self.assertIsNone(code)
+        self.assertEqual(self.calls.get("authed"), "max5x")
+        self.assertEqual(self.calls.get("target"), "max5x")
+        self.assertTrue(self.calls.get("guard"))  # guard still ran, after
+
+    def test_auth_then_swap_handoff_is_announced(self):
+        _, out = self._toggle(answer="")
+        self.assertIn("continuing with the swap", out)
+
+    def test_wrong_account_capture_is_rejected_and_discarded(self):
+        self.auth_captures = "uuid-20x"  # signed into the live account again
+        code, out = self._toggle(answer="y")
+        self.assertEqual(code, 1)
+        self.assertIn("same account", out)
+        self.assertEqual(self.calls.get("deleted"), "max5x")
+        self.assertNotIn("target", self.calls)
+
+    def test_ready_account_skips_the_preflight_entirely(self):
+        self.snaps["max5x"] = {"accountUuid": "uuid-5x",
+                               "oauthAccount": {"emailAddress": "b@x"}}
+        code, _ = self._toggle()
+        self.assertIsNone(code)
+        self.assertNotIn("authed", self.calls)
+        self.assertEqual(self.calls.get("target"), "max5x")
 
 
 # ── auto-rotation with exhaust_credits ──────────────────────────────────────
