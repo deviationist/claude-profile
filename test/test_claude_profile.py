@@ -384,6 +384,38 @@ class EnsureSwappable(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cp.ensure_swappable("/x", True)
 
+    def test_refusal_reports_the_blocked_swap(self):
+        """The refusal must say which account you're on and where you'd go —
+        the session list alone doesn't answer 'is this worth quitting for?'."""
+        cp.live_sessions = lambda d: [{"pid": 5, "cwd": "/w"}]
+        with muted() as buf, self.assertRaises(SystemExit):
+            cp.ensure_swappable("/x", False, "nothing changed — profile p ...")
+        self.assertIn("nothing changed — profile p ...", buf.getvalue())
+
+
+class SwapContext(unittest.TestCase):
+    def setUp(self):
+        self._ls = cp.load_snapshot
+        cp.load_snapshot = lambda n: {"oauthAccount": {"emailAddress": n + "@x"}}
+
+    def tearDown(self):
+        cp.load_snapshot = self._ls
+
+    def test_names_both_ends_with_emails(self):
+        s = cp.swap_context("personal", "max20x", "max5x")
+        self.assertIn('stays on "max20x" (max20x@x)', s)
+        self.assertIn('would go to "max5x" (max5x@x)', s)
+        self.assertIn("personal", s)
+
+    def test_unrecognized_current(self):
+        s = cp.swap_context("personal", None, "max5x")
+        self.assertIn("no recognized live account", s)
+        self.assertIn('"max5x"', s)
+
+    def test_label_without_snapshot(self):
+        cp.load_snapshot = lambda n: None
+        self.assertEqual(cp.account_label("max5x"), '"max5x"')
+
 
 # ── toggle target selection (cyclic next account) ───────────────────────────
 class Toggle(unittest.TestCase):
@@ -400,7 +432,7 @@ class Toggle(unittest.TestCase):
         cp.profile_dir = lambda cfg, prof: "/x"
         cp.load_state = lambda: {}
         cp.save_state = lambda s: None
-        cp.ensure_swappable = lambda d, f: None
+        cp.ensure_swappable = lambda d, f, ctx=None: None
         cp.load_snapshot = lambda n: {"oauthAccount": {"emailAddress": n + "@x"}}
         cp.read_parked_cred = lambda n: oauth_blob()
         cp.activate_account = lambda cfg, s, prof, target: self.saved.__setitem__("target", target)
@@ -454,7 +486,7 @@ class SwapPreflight(unittest.TestCase):
         cp.save_state = lambda s: None
         cp.current_account_of = lambda cfg, prof: "max20x"
         # the session guard fires only if the preflight wrongly runs first
-        cp.ensure_swappable = lambda d, f: self.calls.__setitem__("guard", True)
+        cp.ensure_swappable = lambda d, f, ctx=None: self.calls.__setitem__("guard", True)
         cp.delete_parked_cred = lambda n: self.calls.__setitem__("deleted", n)
         cp.activate_account = lambda cfg, s, prof, t: self.calls.__setitem__("target", t)
         # max20x is live and parked; max5x has never been captured
