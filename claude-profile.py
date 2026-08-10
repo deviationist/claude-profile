@@ -679,11 +679,32 @@ def kill_sessions(sessions, wait=6.0):
     return pids
 
 
-def ensure_swappable(d, force):
+def account_label(name):
+    """`"max5x" (a@pm.me)` — an account name plus the email of its saved login.
+    The bare name is a local alias; the email is what identifies the seat."""
+    if not name:
+        return None
+    email = (load_snapshot(name) or {}).get("oauthAccount", {}).get("emailAddress")
+    return f'"{name}"' + (f" ({email})" if email else "")
+
+
+def swap_context(profile, current, target):
+    """One line describing the swap that a refusal is blocking. The guard's own
+    text names only the config dir, so without this a refused `toggle` never
+    says which account you're on or which one you were headed to — the two
+    things you need to decide whether it's worth quitting sessions over."""
+    now = f"stays on {account_label(current)}" if current else \
+        "has no recognized live account"
+    return f"nothing changed — profile {profile} {now}; " \
+           f"the swap would go to {account_label(target)}"
+
+
+def ensure_swappable(d, force, context=None):
     """Credential-swap guard for config dir `d`. No live sessions → return.
     Live sessions + not force → refuse (a swap under a running session can
     corrupt its credentials). Live sessions + force → terminate them first,
-    then verify they're gone (abort if not)."""
+    then verify they're gone (abort if not). `context` is a caller-supplied
+    line describing the blocked swap (see `swap_context`)."""
     sessions = live_sessions(d)
     if not sessions:
         return
@@ -697,6 +718,8 @@ def ensure_swappable(d, force):
         ]
         for s in sessions:
             lines.append(f"    pid {s['pid']}  {tilde(s.get('cwd')) or '?'}")
+        if context:
+            lines.append(f"  {context}")
         lines.append("  → quit them, or re-run with --force to terminate them first")
         die("\n".join(lines), code=2)
     print(f"--force: terminating {len(sessions)} live Claude session(s) (pids {pids})", file=sys.stderr)
@@ -1675,7 +1698,7 @@ def cmd_account(args):
         print(f"\"{args.name}\" is already the live account of {profile}")
         return
     ensure_account_ready(args.name, current)
-    ensure_swappable(d, args.force)
+    ensure_swappable(d, args.force, swap_context(profile, current, args.name))
     state = load_state()
     with mutation_lock():
         activate_account(cfg, state, profile, args.name)
@@ -1752,7 +1775,7 @@ def cmd_toggle(args):
         target = accounts[0]  # live account unrecognized → start at the first
     d = profile_dir(cfg, profile)
     ensure_account_ready(target, current)
-    ensure_swappable(d, args.force)
+    ensure_swappable(d, args.force, swap_context(profile, current, target))
     state = load_state()
     with mutation_lock():
         activate_account(cfg, state, profile, target)
@@ -1969,8 +1992,9 @@ def cmd_rotate(args):
     if sessions:
         # never swap under a live session; auto mode degrades to a warning
         print(
-            f"claude-profile: \"{current}\" is {why} but {len(sessions)} live session(s) "
-            f"block the swap — close them and relaunch to rotate",
+            f"claude-profile: {profile}: {account_label(current)} is {why} but "
+            f"{len(sessions)} live session(s) block the swap to {account_label(target)} "
+            f"— close them and relaunch to rotate",
             file=sys.stderr,
         )
         return

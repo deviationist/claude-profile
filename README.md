@@ -380,7 +380,19 @@ Nothing else in the config dir is account-bound. A swap:
    + pid liveness) — swapping under a running process risks the old session
    clobbering the new tokens on refresh. `--force` **terminates those sessions
    first** (SIGTERM, then SIGKILL) and verifies they're gone, so the swap is
-   still safe rather than racing a live process,
+   still safe rather than racing a live process. The refusal prints each
+   blocking session (pid + cwd, so you know which terminals to go quit) **and
+   the swap it blocked** — profile, the account you stay on, and the account
+   you would have moved to, both with emails:
+
+   ```
+   claude-profile: 2 live Claude session(s) in ~/.claude-personal — a swap under a running session can corrupt its credentials:
+       pid 38821  ~/code-private/cs-export-exploration
+       pid 32660  ~/.zsh/claude-usage
+     nothing changed — profile personal stays on "max5x" (b@pm.me); the swap would go to "max20x" (a@pm.me)
+     → quit them, or re-run with --force to terminate them first
+   ```
+
 2. re-parks the outgoing account's current blob (so its refresh token stays
    fresh — rotation only happens on use),
 3. writes the incoming account's parked blob into the live Keychain item

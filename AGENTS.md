@@ -28,7 +28,11 @@ python3 stdlib):
 - **`claude-profile`** — status (default), `use <name>|default` (persistent
   profile toggle, fzf picker w/o name), `account <name>` (serial credential
   swap, fzf picker w/o name; refuses under live sessions, `--force` =
-  SIGTERM/SIGKILL them first then swap — `ensure_swappable()`),
+  SIGTERM/SIGKILL them first then swap — `ensure_swappable()`; the refusal
+  lists each blocking pid+cwd *and* the blocked swap via `swap_context()`
+  — profile, current account, target, both labelled with emails by
+  `account_label()`, since the dir name alone doesn't say which seats were
+  involved; `rotate`'s own session-blocked line carries the same labels),
   `toggle` (switch to the NEXT account in the profile list, cyclic — flips
   between two; same `--force`). Both swaps run `ensure_account_ready()` **before**
   `ensure_swappable()` — a target with no parked credential is the never-captured /
