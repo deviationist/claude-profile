@@ -62,6 +62,11 @@ cp ~/code/claude-profile/.env.example ~/code/claude-profile/.env   # optional kn
 
 Requirements: zsh, python3 (stdlib only). Credential store: the macOS Keychain
 (uses `security`) or, on Linux, files — nothing extra to install on either.
+Every launch also **warms claude-usage's caches** for the seat it resolved (when
+that tool is installed): the statusline never blocks, and Claude Code paints it
+once at startup, so a cold cache would show up as a missing segment until your
+first message rather than a late one.
+
 Optional: `fzf` (interactive pickers), [`claude-usage`](https://github.com/deviationist/claude-usage)
 (statusline integration — auto-routed per profile; and its `--all` renders a
 themed usage bar for **every** account here via the `usage-json` porcelain,
