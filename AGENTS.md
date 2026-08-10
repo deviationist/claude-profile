@@ -5,7 +5,9 @@ Claude Code subscription juggler. Two composable modes: **multi-profile**
 **serial accounts** (one dir, several subscriptions; switching swaps only the
 OAuth credential — environment persists bit-for-bit). Full docs: `README.md`.
 
-- Config (user-edited): `~/.config/claude-profile/config.json` —
+- Config (user-edited): `~/.config/claude-profile/config.json`
+  (`$CLAUDE_PROFILE_CONFIG` relocates it; claude-usage watches this file's
+  mtime to expire a cached seat label, so both sides read the same knob) —
   `profiles.<name>: {dir, paths[], accounts[], auto}` + `default_profile`.
 - State (tool-managed): `~/.local/state/claude-profile/` — `state.json`
   (active toggle, usage cache) + `accounts/*.json` (non-secret metadata, via
