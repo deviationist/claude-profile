@@ -365,13 +365,15 @@ naming rules live here, and they're configured, never derived:
 
   | profiles | accounts | label |
   |---|---|---|
-  | 1 | 1 | `Personal` — nothing varies, so name the seat |
+  | 1 | 1 | *(empty)* — nothing varies, so nothing is said |
   | 1 | many | `Max 20x` — the account is the only variable |
   | many | 1 | `Work` |
   | many | many | `Personal (Max 20x)` |
 
   The single-profile host is the case this exists for: `personal (max20x)`
-  there would spend most of its width on a constant.
+  there would spend most of its width on a constant. And one profile holding
+  one subscription can only ever be that seat, so the label is empty — a valid
+  answer (`active` stays true), which consumers render as nothing.
 
 `--dir` is a **reverse lookup** (which profile owns this config dir?) and is
 the right question for a statusline: it knows the dir a session belongs to,

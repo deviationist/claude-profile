@@ -225,11 +225,13 @@ class DisplayLabels(unittest.TestCase):
         }
         self.assertEqual(cp.compose_label(solo, "personal", "max20x"), "Max 20x")
 
-    def test_single_profile_single_account_falls_back_to_profile(self):
-        # Nothing varies at all: name the seat rather than render nothing.
+    def test_single_profile_single_account_has_no_label(self):
+        # Nothing varies, so there is nothing to say — an empty label is a
+        # valid answer, not a failure.
         solo = {"profiles": {"personal": {"dir": "~/.claude", "accounts": ["only"],
                                           "display": "Personal"}}}
-        self.assertEqual(cp.compose_label(solo, "personal", "only"), "Personal")
+        self.assertEqual(cp.compose_label(solo, "personal", "only"), "")
+        self.assertEqual(cp.compose_label(solo, "personal", None), "")
 
 
 class ResolveJson(unittest.TestCase):
