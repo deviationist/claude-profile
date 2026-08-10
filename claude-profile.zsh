@@ -205,6 +205,19 @@ _claude_profile_pick() {
   done
 }
 
+# One-time nudge when the selector is about to fall back to the numbered
+# prompt. fzf is optional — nothing here needs it — but the fuzzy picker is
+# enough of an upgrade to mention once per shell. Lives out here rather than
+# in the picker itself because the picker runs inside `$( … )`, a subshell
+# where a "already said this" flag could never survive to the next call.
+typeset -g _claude_profile_fzf_hinted
+_claude_profile_fzf_hint() {
+  (( $+commands[fzf] )) && return
+  [[ -n "$_claude_profile_fzf_hinted" || -n "$CLAUDE_PROFILE_NO_FZF_HINT" ]] && return
+  _claude_profile_fzf_hinted=1
+  print -u2 -- "tip: install fzf for a searchable picker (CLAUDE_PROFILE_NO_FZF_HINT=1 hides this)"
+}
+
 # ── CLI (with pickers) ──────────────────────────────────────────────────────
 
 claude-profile() {
@@ -213,6 +226,7 @@ claude-profile() {
     use)
       if [[ -z "$2" ]]; then
         local sel
+        _claude_profile_fzf_hint
         sel=$(_claude_profile_py list 2>/dev/null \
               | _claude_profile_pick 'profile> ' 'select active profile (esc/empty to cancel)') || return
         set -- use "$sel"
@@ -221,6 +235,7 @@ claude-profile() {
     account|auth|delete)
       if [[ -z "$2" || "$2" == --* ]]; then
         local _cmd="$1" sel
+        _claude_profile_fzf_hint
         sel=$(_claude_profile_py accounts 2>/dev/null \
               | _claude_profile_pick "${_cmd}> " "select account for '${_cmd}' (esc/empty to cancel)") || return
         set -- "$_cmd" "$sel" "${@:2}"
