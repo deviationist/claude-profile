@@ -147,6 +147,14 @@ no credential swap while sessions run in the dir; passthrough (no
 `CLAUDE_CONFIG_DIR` honored verbatim (ccfind resumes through it); unknown usage
 = not exhausted (a launch is never blocked on a guess).
 
+Colour: `status` is the only command that emits SGR — `color_enabled()` gates
+on isatty, honours `NO_COLOR`, and takes `$CLAUDE_PROFILE_COLOR=always|never`
+(`always` wins over `NO_COLOR`, as `ls --color=always` does; the README-SVG
+generator relies on it). **Invariant: no porcelain may ever emit an escape** —
+`list`/`accounts`/`resolve --json`/`usage-json` are parsed by field by the zsh
+layer and claude-usage; there are tests for this at both levels. `c()` colours,
+callers pad first (escapes count toward str width, not toward drawn width).
+
 Selector: the name-less forms of `use`/`account`/`auth`/`delete` open
 `_claude_profile_pick` — fzf when installed, a numbered `/dev/tty` prompt
 otherwise. fzf is optional and documented as such; the fallback prints a

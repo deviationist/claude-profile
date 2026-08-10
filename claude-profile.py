@@ -201,6 +201,35 @@ def interactive():
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+# ── colour ──────────────────────────────────────────────────────────────────
+# `status` is the only human-facing screen, so it is the only thing that ever
+# emits colour. Every porcelain (`list`, `accounts`, `resolve --json`,
+# `usage-json`) stays byte-identical: the zsh layer, claude-usage and the tests
+# all parse those, and an escape sequence in a field would be a silent corruption.
+# Off when piped, honouring NO_COLOR; $CLAUDE_PROFILE_COLOR=always|never forces
+# it either way (always is what the README-SVG generator uses).
+_SGR = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33",
+        "blue": "34", "magenta": "35", "cyan": "36"}
+
+
+def color_enabled():
+    mode = os.environ.get("CLAUDE_PROFILE_COLOR", "auto")
+    if mode == "always":
+        return True
+    if mode == "never" or "NO_COLOR" in os.environ:
+        return False
+    return sys.stdout.isatty()
+
+
+def c(text, *styles):
+    """Wrap `text` in SGR styles when colour is on. Callers must pad/align
+    BEFORE colouring — escape sequences count toward str width but not toward
+    what the terminal draws."""
+    if not text or not styles or not color_enabled():
+        return text
+    return "\033[" + ";".join(_SGR[s] for s in styles) + "m" + text + "\033[0m"
+
+
 def tilde(p):
     """Inverse of expand() for display: re-contract $HOME to `~`."""
     if not p:
@@ -1474,10 +1503,11 @@ def cmd_status(args):
     cfg = load_config()
     state = load_state()
     resolved, how = resolve_profile(cfg, state, os.getcwd())
-    print(f"config: {CONFIG_PATH}")
+    print(c(f"config: {CONFIG_PATH}", "dim"))
     toggle = state.get("active_profile")
     if toggle:
-        print(f"toggle: {toggle} (explicit — clear with `claude-profile use default`)")
+        print(c("toggle: ", "dim") + c(toggle, "bold", "cyan")
+              + c(" (explicit — clear with `claude-profile use default`)", "dim"))
     print()
     for name, p in cfg["profiles"].items():
         d = profile_dir(cfg, name)
@@ -1488,16 +1518,28 @@ def cmd_status(args):
             marks.append("default")
         if p.get("auto") and is_serial(cfg, name):
             marks.append("auto-rotate")
-        mark = f"  [{', '.join(marks)}]" if marks else ""
-        bullet = "●" if name == resolved else "○"
-        print(f"{bullet} {name}  {p['dir']}{mark}")
+        # Each mark carries its own weight: which profile is live is the one
+        # thing worth finding at a glance, so only "active:*" gets a colour.
+        shown = []
+        for m in marks:
+            if m.startswith("active:"):
+                shown.append(c(m, "green"))
+            elif m == "auto-rotate":
+                shown.append(c(m, "cyan"))
+            else:
+                shown.append(c(m, "dim"))
+        mark = ("  " + c("[", "dim") + c(", ", "dim").join(shown) + c("]", "dim")) if marks else ""
+        live = name == resolved
+        bullet = c("●", "green") if live else c("○", "dim")
+        print(f"{bullet} " + (c(name, "bold", "green") if live else c(name, "bold"))
+              + "  " + c(p["dir"], "dim") + mark)
         for raw in p.get("paths") or []:
-            print(f"    path: {raw}")
+            print(c(f"    path: {raw}", "dim"))
         accounts = profile_accounts(cfg, name)
         current = current_account_of(cfg, name) if accounts else None
         sessions = live_sessions(d)
         if sessions:
-            print(f"    live sessions: {len(sessions)} (account swap blocked)")
+            print(c(f"    live sessions: {len(sessions)} (account swap blocked)", "yellow"))
         for acct in accounts:
             snap = load_snapshot(acct)
             is_live = acct == current
@@ -1517,15 +1559,22 @@ def cmd_status(args):
                 usage = "  " + fmt_limits(cache.get("limits")) if cache else ""
             health = refresh_health(parked_blob) if (parked_blob and not is_live) else ""
             if health:
-                usage += f"  ⚠ {health} → claude-profile auth {acct}"
-            print(f"    {'▸' if is_live else ' '} {acct:<10} {tag} {email}{usage}")
+                usage += c(f"  ⚠ {health} → claude-profile auth {acct}",
+                           "red" if "EXPIRED" in health else "yellow")
+            # Pad first, colour second — see c().
+            marker = c("▸", "green") if is_live else " "
+            name_cell = acct.ljust(10)
+            name_cell = c(name_cell, "bold", "green") if is_live else c(name_cell, "bold")
+            tag_cell = {"ACTIVE ": ("green", "bold"), "parked ": ("dim",)}.get(tag, ("red",))
+            print(f"    {marker} {name_cell} {c(tag, *tag_cell)} {c(email, 'dim')}{usage}")
             th = token_horizon(blob, snap)
             if not account_keepalive(cfg, acct):
                 th = (th + "  · keep-alive OFF") if th else "keep-alive OFF"
             if th:
-                print(f"        {th}")
+                print(c(f"        {th}", "dim"))
         if accounts and current is None:
-            print("      (live account unrecognized — run `claude-profile save <name>`)")
+            print(c("      (live account unrecognized — run `claude-profile save <name>`)",
+                    "yellow"))
     configured = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
     strays = sorted(saved_account_names() - configured)
     if strays:

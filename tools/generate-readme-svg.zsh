@@ -14,8 +14,10 @@
 # from which the grid/emitter core here is borrowed; keep the three roughly in
 # sync. Two differences worth knowing:
 #
-#   * claude-profile emits no ANSI at all, so there is no SGR→<tspan fill>
-#     conversion here. Rows are plain, with dim reserved for the chrome.
+#   * only `status` emits SGR (the porcelain never does), so the ANSI→<tspan>
+#     conversion below is used for the status image and nothing else. It is
+#     the same core as the siblings', trimmed to the SGRs this tool uses:
+#     bold/dim and the eight normal foregrounds.
 #   * the selector image shows the fzf branch, and fzf paints with cursor
 #     addressing that an SVG grid cannot replay. So instead of screen-scraping
 #     it, a stub `fzf` on PATH captures exactly the row list the real picker
@@ -141,7 +143,7 @@ cp="python3 $root/claude-profile.py"
 # Run from a path rule directory, so the status screen shows "active:path" —
 # the most interesting of the three resolution reasons.
 mkdir -p "$fakehome/code-private/app"
-status_out=$(cd "$fakehome/code-private/app" && ${=cp} status 2>&1)
+status_out=$(cd "$fakehome/code-private/app" && CLAUDE_PROFILE_COLOR=always ${=cp} status 2>&1)
 # The tool prints its config path verbatim while tilde-contracting profile
 # dirs; contract the sandbox home the same way so the demo reads like a real
 # machine rather than a temp dir. Display-only, and nothing else is touched.
@@ -177,6 +179,9 @@ INFO='#f9e2af'  # match counter
 HDR='#94e2d5'   # header
 RULE='#45475a'  # the solid rule fzf draws on the info line
 GUT='#313244'   # the gutter bar every list row carries
+typeset -a ANSI_N ANSI_B
+ANSI_N=('#000000' '#b43c2a' '#00c200' '#c7c400' '#0225c7' '#ca30c7' '#00c5c7' '#c7c7c7')
+ANSI_B=('#686868' '#dd7975' '#58e790' '#ece100' '#6871ff' '#ff77ff' '#60fdff' '#ffffff')
 HL='#313244'    # current-line background
 FONT="'Cascadia Code','Fira Code',SFMono-Regular,Consolas,Menlo,monospace"
 integer FS=13 LH=20 TH=30 PX=20 PY=14 SLACK=24 MINCOLS=52
@@ -191,17 +196,62 @@ for (( k = 0; k <= 400; k++ )); do printf -v v '%.2f' $(( PX + k * cw )); XCOL[k
 xrun() { print -rn -- "${(j: :)XCOL[$1+1,$1+$2]}" }
 xesc() { local s=$1; s=${s//\&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; print -rn -- "$s" }
 
+# Visible length of a row, ignoring SGR sequences — what the grid must size to.
+vlen() { local t=$1; t=${t//$'\e['[0-9;]#m/}; print -rn -- ${#t} }
+
+# One SGR line → <tspan> runs, carrying bold/dim + colour index across the line.
+# Every run is pinned to its own columns so alignment survives font fallback.
+render_ansi() {
+  local s=$1 out="" pre tail params pcode
+  integer col=0 bold=0 dim=0
+  local fill="" cidx=""
+  local -a parts
+  recompute() {
+    if [[ -n $cidx ]]; then (( bold )) && fill=$ANSI_B[cidx+1] || fill=$ANSI_N[cidx+1]
+    elif (( dim )); then fill=$DIMC
+    else fill=""; fi
+  }
+  while [[ -n $s ]]; do
+    pre=${s%%$'\e'*}
+    if [[ -n $pre ]]; then
+      out+="<tspan x=\"$(xrun col ${#pre})\"${fill:+ fill=\"$fill\"}>$(xesc "$pre")</tspan>"
+      (( col += ${#pre} ))
+    fi
+    s=${s[$(( ${#pre} + 1 )),-1]}
+    [[ -n $s ]] || break
+    if [[ ${s[2]} == '[' ]]; then
+      tail=${s#$'\e['}; params=${tail%%m*}
+      s=${tail[$(( ${#params} + 2 )),-1]}
+      parts=(${(s:;:)params}); (( ${#parts} )) || parts=(0)
+      for pcode in $parts; do
+        case $pcode in
+          0)  bold=0; dim=0; cidx="" ;;
+          1)  bold=1 ;;
+          2)  dim=1 ;;
+          3<->|<30-37>) cidx=$(( pcode - 30 )) ;;
+          <90-97>) cidx=$(( pcode - 90 )); bold=1 ;;
+          39) cidx="" ;;
+        esac
+      done
+      recompute
+    else
+      s=${s[3,-1]}
+    fi
+  done
+  print -rn -- "$out"
+}
+
 # emit_svg <lines-array-name> <out-file> <title> <aria>
 # Each entry: TYPE|content — b=blank, t=plain, c=dim, and the fzf frame:
-# q=prompt (+cursor), i=match counter + separator rule, h=header, n=row,
-# p=current row.
+# a=SGR-coloured row (status), and the fzf frame: q=prompt (+cursor),
+# i=match counter + separator rule, h=header, n=row, p=current row.
 # Everything in the fzf frame except q sits at column 2, as fzf indents it.
 emit_svg() {
   local -a _lines=("${(@P)1}")
   local out=$2 title=$3 aria=$4 entry typ body
   integer maxcols=0 n
   for entry in "${_lines[@]}"; do
-    body=${entry#*|}; n=${#body}
+    body=${entry#*|}; n=$(vlen "$body")
     [[ ${entry%%\|*} == (p|n|h|i) ]] && (( n += 2 ))
     (( n > maxcols )) && maxcols=$n
   done
@@ -224,6 +274,7 @@ emit_svg() {
       case $typ in
         b) ;;
         t) print -r -- "$T fill=\"$FG\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>" ;;
+        a) print -r -- "$T fill=\"$FG\">$(render_ansi "$body")</text>" ;;
         c) print -r -- "$T fill=\"$DIMC\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>" ;;
         n) # every list row carries the gutter bar; only the current one is pink
            print -r -- "  <rect x=\"$PX\" y=\"$(( y - FS - 3 ))\" width=\"3\" height=\"$LH\" fill=\"$GUT\"/>"
@@ -254,7 +305,7 @@ status_lines=('t|% claude-profile' 'b|')
 local ln
 for ln in "${(@f)status_out}"; do
   [[ -z $ln ]] && { status_lines+=('b|'); continue }
-  status_lines+=("t|$ln")
+  status_lines+=("a|$ln")
 done
 
 # Prompt and header are read back from the recorded argv, not retyped here.
