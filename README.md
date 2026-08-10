@@ -7,12 +7,8 @@ restart (a running session keeps its old token), so it's a between-sessions
 switch, not mid-session.
 
 <div align="center">
-  <img src="assets/status-d13fc5.svg" alt="claude-profile status: two profiles, the active one marked with a filled bullet and its cwd path rules listed, its two accounts below with the live one tagged ACTIVE and both showing their token horizons">
+  <img src="assets/status-311215.svg" alt="claude-profile status: two profiles, the active one marked with a filled bullet and its cwd path rules listed, its two accounts below with the live one tagged ACTIVE and both showing their token horizons">
 </div>
-
-(The text is genuine output — `tools/generate-readme-svg.zsh` runs the real
-tool against a seeded sandbox and lays the result out on a terminal grid.
-Only the window chrome is drawn.)
 
 Two composable modes:
 
@@ -212,7 +208,7 @@ Leave the name off any of the selection commands and you get a picker over
 exactly the seats you have configured — fuzzy with `fzf`, numbered without it:
 
 <div align="center">
-  <img src="assets/selector-d13fc5.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
+  <img src="assets/selector-311215.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
 </div>
 
 ```
@@ -248,6 +244,25 @@ claude-with <profile> [args]       one-shot launch against a profile
 claude-switch [<name>]             alias for `claude-profile use`
 claude-default                     one-shot launch with CLAUDE_CONFIG_DIR unset
 ```
+
+### Colour
+
+`status` colours the things you scan for — which profile is live, why it won
+(`active:path` vs the toggle vs `default`), and which account is `ACTIVE` —
+and dims the rest. It is the **only** command that ever emits colour: every
+porcelain (`list`, `accounts`, `resolve --json`, `usage-json`) stays
+byte-identical, because the shell layer and `claude-usage` parse those by field.
+
+Colour is on only when stdout is a terminal, so piping or redirecting already
+gives you plain text. To force it either way:
+
+```sh
+NO_COLOR=1 claude-profile                  # off (the usual convention)
+CLAUDE_PROFILE_COLOR=never  claude-profile # off
+CLAUDE_PROFILE_COLOR=always claude-profile # on, even through a pipe
+```
+
+`CLAUDE_PROFILE_COLOR=always` outranks `NO_COLOR`, matching `ls --color=always`.
 
 ### Bootstrapping serial accounts
 
