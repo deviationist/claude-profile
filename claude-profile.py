@@ -293,12 +293,28 @@ def account_display(cfg, account):
 
 
 def compose_label(cfg, profile, account):
-    """"Personal (Max 5x)" for a serial profile, "Work" for a single-account
-    one. The account is only worth naming when the profile holds more than
-    one — otherwise the profile name already identifies the seat."""
+    """Name only what actually disambiguates this seat.
+
+    A label earns its space by answering "which one am I on?", so each half is
+    included only when there's something to tell apart:
+
+        profiles  accounts  label
+        1         1         "Personal"          nothing varies; name the seat
+        1         many      "Max 20x"           the account is the only variable
+        many      1         "Work"              the profile is the only variable
+        many      many      "Personal (Max 20x)"
+
+    The single-profile machine is the case worth getting right: on a host with
+    one profile and two subscriptions, "personal (max20x)" spends most of its
+    width on a constant.
+    """
     p = profile_display(cfg, profile)
-    if account and is_serial(cfg, profile):
-        return f"{p} ({account_display(cfg, account)})"
+    a = account_display(cfg, account) if (account and is_serial(cfg, profile)) else None
+    show_p = len(cfg.get("profiles") or {}) > 1
+    if show_p and a:
+        return f"{p} ({a})"
+    if a:
+        return a
     return p
 
 

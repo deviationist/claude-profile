@@ -213,6 +213,24 @@ class DisplayLabels(unittest.TestCase):
         self.assertEqual(cp.compose_label(self.CFG, "pm-me", "solo"), "pm-me")
         self.assertEqual(cp.compose_label(self.CFG, "work", None), "work")
 
+    def test_profile_dropped_when_it_is_the_only_one(self):
+        # A single-profile host: the profile name is a constant, so the label
+        # is the account alone — "personal (max20x)" spends most of its width
+        # saying nothing.
+        solo = {
+            "profiles": {"personal": {"dir": "~/.claude",
+                                      "accounts": ["max20x", "max5x"],
+                                      "display": "Personal"}},
+            "account_display": {"max20x": "Max 20x"},
+        }
+        self.assertEqual(cp.compose_label(solo, "personal", "max20x"), "Max 20x")
+
+    def test_single_profile_single_account_falls_back_to_profile(self):
+        # Nothing varies at all: name the seat rather than render nothing.
+        solo = {"profiles": {"personal": {"dir": "~/.claude", "accounts": ["only"],
+                                          "display": "Personal"}}}
+        self.assertEqual(cp.compose_label(solo, "personal", "only"), "Personal")
+
 
 class ResolveJson(unittest.TestCase):
     def setUp(self):
