@@ -25,10 +25,10 @@
 #     match counter, prompt) is drawn around them.
 #
 # Usage:  zsh tools/generate-readme-svg.zsh
-#           → assets/{status,selector}-<hash>.svg, older ones deleted, README
+#           → assets/{status,selector,guard}-<hash>.svg, older ones deleted, README
 #             <img> references rewritten (the random hash busts GitHub's camo
 #             image cache). Commit all three files.
-#         zsh tools/generate-readme-svg.zsh STATUS.svg SELECTOR.svg
+#         zsh tools/generate-readme-svg.zsh STATUS.svg SELECTOR.svg GUARD.svg
 #           → fixed paths, README untouched.
 #
 # Regenerate whenever the status layout, the selector, or these demo values
@@ -163,7 +163,19 @@ typeset -a sel_rows
 sel_rows=("${(@f)$(<"$FZF_CAPTURE")}")
 sel_rows=("${(@)sel_rows%%$'\t'*}")     # drop the hidden key column fzf hides
 
-[[ -n $status_out && ${#sel_rows} -gt 0 ]] || {
+# The live-session guard, captured after the two screens above so the status
+# image stays session-free. live_sessions() reads <dir>/sessions/*.json and
+# keeps any entry whose pid is actually alive — so seeding one with this
+# script's own pid gives a real refusal from an unmodified tool, rather than a
+# transcript of one.
+mkdir -p "$fakehome/.claude-personal/sessions"
+print -r -- "{\"pid\":$$,\"cwd\":\"$fakehome/code-private/app\"}" \
+  > "$fakehome/.claude-personal/sessions/demo.json"
+guard_out=$(cd "$fakehome/code-private/app" \
+            && CLAUDE_PROFILE_COLOR=always ${=cp} toggle 2>&1)
+guard_out=${guard_out//$fakehome/\~}
+
+[[ -n $status_out && -n $guard_out && ${#sel_rows} -gt 0 ]] || {
   print -u2 "generate-readme-svg: sandbox produced no output — aborting"; exit 1
 }
 
@@ -340,23 +352,35 @@ for ln in "${sel_rows[@]}"; do
   (( j++ ))
 done
 
+typeset -a guard_lines
+guard_lines=('t|% claude-profile toggle' 'b|')
+for ln in "${(@f)guard_out}"; do
+  [[ -z $ln ]] && { guard_lines+=('b|'); continue }
+  guard_lines+=("a|$ln")
+done
+
 # ---- write -----------------------------------------------------------------
 STATUS_ARIA='claude-profile status: two profiles, the active one marked, its two accounts with the live one tagged ACTIVE and the parked one showing its token horizon'
 SEL_ARIA='claude-profile use with no name: an fzf picker listing both profiles, the active one marked, with a prompt to filter'
+GUARD_ARIA='claude-profile toggle refusing to swap: a warning that one live Claude session is running, the pid listed beneath it, a note that nothing changed and which accounts the swap was between, and a hint to quit them or re-run with --force'
 
 if [[ -n ${1:-} ]]; then
   emit_svg status_lines   "$1" 'claude-profile' "$STATUS_ARIA"; print "wrote $1"
   [[ -n ${2:-} ]] && { emit_svg selector_lines "$2" 'claude-profile' "$SEL_ARIA"; print "wrote $2" }
+  [[ -n ${3:-} ]] && { emit_svg guard_lines    "$3" 'claude-profile' "$GUARD_ARIA"; print "wrote $3" }
 else
   mkdir -p "$root/assets"
   local old
-  for old in "$root"/assets/status-*.svg(N) "$root"/assets/selector-*.svg(N); do rm -f "$old"; done
+  for old in "$root"/assets/status-*.svg(N) "$root"/assets/selector-*.svg(N) \
+             "$root"/assets/guard-*.svg(N); do rm -f "$old"; done
   local hash; hash=$(xxd -l3 -p /dev/urandom)
   emit_svg status_lines   "$root/assets/status-${hash}.svg"   'claude-profile' "$STATUS_ARIA"
   emit_svg selector_lines "$root/assets/selector-${hash}.svg" 'claude-profile' "$SEL_ARIA"
+  emit_svg guard_lines    "$root/assets/guard-${hash}.svg"    'claude-profile' "$GUARD_ARIA"
   sed -i.bak \
     -e "s|assets/status-[^)\"]*\.svg|assets/status-${hash}.svg|" \
     -e "s|assets/selector-[^)\"]*\.svg|assets/selector-${hash}.svg|" \
+    -e "s|assets/guard-[^)\"]*\.svg|assets/guard-${hash}.svg|" \
     "$root/README.md" && rm -f "$root/README.md.bak"
-  print "wrote assets/{status,selector}-${hash}.svg and updated README.md"
+  print "wrote assets/{status,selector,guard}-${hash}.svg and updated README.md"
 fi
