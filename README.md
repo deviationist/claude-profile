@@ -7,7 +7,7 @@ restart (a running session keeps its old token), so it's a between-sessions
 switch, not mid-session.
 
 <div align="center">
-  <img src="assets/status-311215.svg" alt="claude-profile status: two profiles, the active one marked with a filled bullet and its cwd path rules listed, its two accounts below with the live one tagged ACTIVE and both showing their token horizons">
+  <img src="assets/status-9b8855.svg" alt="claude-profile status: two profiles, the active one marked with a filled bullet and its cwd path rules listed, its two accounts below with the live one tagged ACTIVE and both showing their token horizons">
 </div>
 
 Two composable modes:
@@ -208,7 +208,7 @@ Leave the name off any of the selection commands and you get a picker over
 exactly the seats you have configured — fuzzy with `fzf`, numbered without it:
 
 <div align="center">
-  <img src="assets/selector-311215.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
+  <img src="assets/selector-9b8855.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
 </div>
 
 ```
@@ -247,11 +247,19 @@ claude-default                     one-shot launch with CLAUDE_CONFIG_DIR unset
 
 ### Colour
 
-`status` colours the things you scan for — which profile is live, why it won
-(`active:path` vs the toggle vs `default`), and which account is `ACTIVE` —
-and dims the rest. It is the **only** command that ever emits colour: every
-porcelain (`list`, `accounts`, `resolve --json`, `usage-json`) stays
-byte-identical, because the shell layer and `claude-usage` parse those by field.
+The human-facing commands colour what you scan for and dim the rest:
+
+| | |
+|---|---|
+| **green** | it happened — the active profile and its live account in `status`, and the result line of `use` / `account` / `toggle` / `save` / `auth` / `delete` |
+| **yellow** | it didn't happen, or won't for long — no-ops, the live-session refusal, an expiring token |
+| **cyan** | what to do about it — the `--force` hint, `auto-rotate`, a `--dry-run` preview |
+| **red** | errors |
+| dim | supporting detail: dirs, path rules, emails, token horizons, pids |
+
+The **porcelain never colours**, whatever the setting: `list`, `accounts`,
+`resolve` (and `--json`), `dir` and `usage-json` stay byte-identical, because
+the shell layer and `claude-usage` parse those by field.
 
 Colour is on only when stdout is a terminal, so piping or redirecting already
 gives you plain text. To force it either way:
