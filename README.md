@@ -7,7 +7,7 @@ restart (a running session keeps its old token), so it's a between-sessions
 switch, not mid-session.
 
 <div align="center">
-  <img src="assets/status-498fe2.svg" alt="claude-profile status: two profiles, the active one marked with a filled bullet and its cwd path rules listed, its two accounts below with the live one tagged ACTIVE and both showing their token horizons">
+  <img src="assets/status-d13fc5.svg" alt="claude-profile status: two profiles, the active one marked with a filled bullet and its cwd path rules listed, its two accounts below with the live one tagged ACTIVE and both showing their token horizons">
 </div>
 
 (The text is genuine output — `tools/generate-readme-svg.zsh` runs the real
@@ -212,7 +212,7 @@ Leave the name off any of the selection commands and you get a picker over
 exactly the seats you have configured — fuzzy with `fzf`, numbered without it:
 
 <div align="center">
-  <img src="assets/selector-498fe2.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
+  <img src="assets/selector-d13fc5.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
 </div>
 
 ```
