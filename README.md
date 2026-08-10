@@ -360,8 +360,20 @@ naming rules live here, and they're configured, never derived:
   human-facing casing; an unconfigured name renders exactly as written, so a
   profile called `pm-me` stays `pm-me` instead of being title-cased into
   nonsense.
-- The account appears in parentheses **only when the profile is serial**. One
-  subscription needs no disambiguation, so it renders as just `Personal`.
+- Each half is included **only when it disambiguates something** — a label
+  earns its width by answering "which one am I on?":
+
+  | profiles | accounts | label |
+  |---|---|---|
+  | 1 | 1 | *(empty)* — nothing varies, so nothing is said |
+  | 1 | many | `Max 20x` — the account is the only variable |
+  | many | 1 | `Work` |
+  | many | many | `Personal (Max 20x)` |
+
+  The single-profile host is the case this exists for: `personal (max20x)`
+  there would spend most of its width on a constant. And one profile holding
+  one subscription can only ever be that seat, so the label is empty — a valid
+  answer (`active` stays true), which consumers render as nothing.
 
 `--dir` is a **reverse lookup** (which profile owns this config dir?) and is
 the right question for a statusline: it knows the dir a session belongs to,

@@ -293,13 +293,27 @@ def account_display(cfg, account):
 
 
 def compose_label(cfg, profile, account):
-    """"Personal (Max 5x)" for a serial profile, "Work" for a single-account
-    one. The account is only worth naming when the profile holds more than
-    one — otherwise the profile name already identifies the seat."""
-    p = profile_display(cfg, profile)
-    if account and is_serial(cfg, profile):
-        return f"{p} ({account_display(cfg, account)})"
-    return p
+    """Name only what actually disambiguates this seat.
+
+    A label earns its space by answering "which one am I on?", so each half is
+    included only when there's something to tell apart:
+
+        profiles  accounts  label
+        1         1         ""                  nothing varies — say nothing
+        1         many      "Max 20x"           the account is the only variable
+        many      1         "Work"              the profile is the only variable
+        many      many      "Personal (Max 20x)"
+
+    The empty case is deliberate. One profile holding one subscription can only
+    ever be that seat, so a label there is decoration in a status line's
+    scarcest resource. Consumers treat "" as "render nothing" — it is a valid
+    answer, not a failure (`active` stays true).
+    """
+    a = account_display(cfg, account) if (account and is_serial(cfg, profile)) else None
+    p = profile_display(cfg, profile) if len(cfg.get("profiles") or {}) > 1 else None
+    if p and a:
+        return f"{p} ({a})"
+    return a or p or ""
 
 
 def profile_of_dir(cfg, d):
