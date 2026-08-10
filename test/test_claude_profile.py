@@ -296,6 +296,62 @@ class ResolveJson(unittest.TestCase):
         self.assertEqual(len(buf.getvalue().strip().split("\t")), 3)
 
 
+# ── colour (status only, never the porcelain) ───────────────────────────────
+class Colour(unittest.TestCase):
+    """Colour is a display concern for `status`. The invariant that matters is
+    that no porcelain can ever grow an escape sequence — the zsh layer,
+    claude-usage and these tests all parse those streams by field."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        for k in ("CLAUDE_PROFILE_COLOR", "NO_COLOR"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def test_off_when_not_a_tty(self):
+        # stdout here is a StringIO, i.e. exactly the piped case.
+        with muted():
+            self.assertFalse(cp.color_enabled())
+
+    def test_always_and_never_force_it(self):
+        os.environ["CLAUDE_PROFILE_COLOR"] = "always"
+        self.assertTrue(cp.color_enabled())
+        os.environ["CLAUDE_PROFILE_COLOR"] = "never"
+        self.assertFalse(cp.color_enabled())
+
+    def test_no_color_beats_auto(self):
+        os.environ["NO_COLOR"] = "1"
+        self.assertFalse(cp.color_enabled())
+
+    def test_no_color_is_honoured_when_empty(self):
+        # The NO_COLOR convention is presence-based, not value-based.
+        os.environ["NO_COLOR"] = ""
+        self.assertFalse(cp.color_enabled())
+
+    def test_explicit_always_outranks_no_color(self):
+        # Same precedence as `ls --color=always`: an explicit request wins.
+        os.environ["NO_COLOR"] = "1"
+        os.environ["CLAUDE_PROFILE_COLOR"] = "always"
+        self.assertTrue(cp.color_enabled())
+
+    def test_c_is_a_noop_when_disabled(self):
+        os.environ["CLAUDE_PROFILE_COLOR"] = "never"
+        self.assertEqual(cp.c("hi", "bold", "green"), "hi")
+
+    def test_c_wraps_and_resets_when_enabled(self):
+        os.environ["CLAUDE_PROFILE_COLOR"] = "always"
+        self.assertEqual(cp.c("hi", "bold", "green"), "\033[1;32mhi\033[0m")
+
+    def test_c_leaves_empty_text_alone(self):
+        # Padding/alignment relies on c("") staying empty rather than becoming
+        # a bare reset sequence.
+        os.environ["CLAUDE_PROFILE_COLOR"] = "always"
+        self.assertEqual(cp.c("", "bold"), "")
+
+
 # ── OAuth constant resolution (env → config → None) ─────────────────────────
 class OAuthSetting(unittest.TestCase):
     def setUp(self):
