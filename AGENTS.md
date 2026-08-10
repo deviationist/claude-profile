@@ -28,8 +28,8 @@ python3 stdlib):
   never swaps under live sessions). macOS launches run under `caffeinate`
   (knobs in `./.env`). Bypass: `\claude`.
 - **`claude-profile`** — status (default), `use <name>|default` (persistent
-  profile toggle, fzf picker w/o name), `account <name>` (serial credential
-  swap, fzf picker w/o name; refuses under live sessions, `--force` =
+  profile toggle, picker w/o name), `account <name>` (serial credential
+  swap, picker w/o name; refuses under live sessions, `--force` =
   SIGTERM/SIGKILL them first then swap — `ensure_swappable()`; the refusal
   lists each blocking pid+cwd *and* the blocked swap via `swap_context()`
   — profile, current account, target, both labelled with emails by
@@ -143,5 +143,14 @@ python3 stdlib):
 
 Safety invariants (do not regress): secrets never on disk / never in argv;
 no credential swap while sessions run in the dir; passthrough (no
-`CLAUDE_CONFIG_DIR`) whenever the resolved dir is `~/.claude`; unknown usage
+`CLAUDE_CONFIG_DIR`) whenever the resolved dir is `~/.claude`; a caller-set
+`CLAUDE_CONFIG_DIR` honored verbatim (ccfind resumes through it); unknown usage
 = not exhausted (a launch is never blocked on a guess).
+
+Tests: `test/run.sh` runs both suites — `test/test_claude_profile.py` (python
+core, stdlib unittest) and `test/{picker,wrapper}.bats` (zsh layer: the selector
+screen's fzf + numbered branches, the wrapper's resolution order, and the
+argv-shaping). The zsh suite needs `bats`; the numbered fallback is driven
+through a real pty by `test/pty_run.py` because it reads `/dev/tty`. Harness
+notes in `test/README.md`. Every invariant above has a test — add one alongside
+any change here.

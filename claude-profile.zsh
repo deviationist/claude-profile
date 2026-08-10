@@ -22,7 +22,8 @@
 #
 # Conveniences:
 #   claude-profile            status (no args); `use`/`account` without a name
-#                             open an fzf picker when fzf is installed
+#                             open a selector screen — fzf when installed,
+#                             a numbered prompt otherwise
 #   claude-with NAME [args]   one-shot launch against profile NAME
 #   claude-switch [NAME]      alias for `claude-profile use`
 #   claude-default            one-shot launch with CLAUDE_CONFIG_DIR unset
@@ -123,34 +124,109 @@ claude-with() {
 # One-shot with CLAUDE_CONFIG_DIR unset — bit-for-bit no-wrapper behavior.
 claude-default() { ( unset CLAUDE_CONFIG_DIR; _claude_exec "$@" ); }
 
-# ── CLI (with fzf pickers) ──────────────────────────────────────────────────
+# ── selector screen ─────────────────────────────────────────────────────────
+
+# Shared picker behind the name-less forms of `use`/`account`/`auth`/`delete`.
+# Reads porcelain `key<TAB>col<TAB>col` lines (the `list` / `accounts` output)
+# on stdin, column-aligns them into one row per entry, and prints the chosen
+# key on stdout. fzf drives it when installed; otherwise a numbered prompt on
+# /dev/tty does the same job — so on a box without fzf the selector degrades
+# rather than disappearing (previously the command just fell through to python
+# and died on argparse's "argument name is required"). Every byte of the menu
+# goes to stderr so the chosen key is the only thing on stdout. Non-zero exit
+# = cancelled (esc, empty answer, no rows, or no tty).
+_claude_profile_pick() {
+  local prompt="$1" header="$2"
+  # Slurp stdin whole with the builtin rather than $(cat): no fork, and — more
+  # to the point — the picker then shells out to nothing but fzf, so "fzf is
+  # not installed" is testable by simply emptying PATH.  `read -d ''` stops at
+  # EOF and reports 1 there, which is the normal end of input, not an error.
+  local raw
+  IFS= read -rd '' raw
+  local -a rows
+  rows=("${(@f)raw}")
+  rows=("${(@)rows:#}")
+  (( ${#rows} )) || return 1
+
+  # Column widths across every row (last field is never padded, and trailing
+  # empty fields — e.g. the blank "active" marker — are dropped entirely).
+  local -a w fs pieces keys disp
+  local row i
+  for row in $rows; do
+    fs=("${(@ps:\t:)row}")
+    for (( i = 1; i <= ${#fs}; i++ )); do
+      (( ${#fs[i]} > ${w[i]:-0} )) && w[i]=${#fs[i]}
+    done
+  done
+  for row in $rows; do
+    fs=("${(@ps:\t:)row}")
+    keys+=("${fs[1]}")
+    while (( ${#fs} > 1 )) && [[ -z "${fs[-1]}" ]]; do fs=("${(@)fs[1,-2]}"); done
+    pieces=()
+    for (( i = 1; i <= ${#fs}; i++ )); do
+      if (( i < ${#fs} )); then pieces+=("${(r:${w[i]}:)fs[i]}"); else pieces+=("${fs[i]}"); fi
+    done
+    disp+=("${(j:  :)pieces}")
+  done
+
+  # fzf: feed `display<TAB>key` and hide the key column, so a name containing
+  # whitespace still round-trips intact.
+  if (( $+commands[fzf] )); then
+    local sel
+    sel=$(for (( i = 1; i <= ${#disp}; i++ )); do print -r -- "${disp[i]}"$'\t'"${keys[i]}"; done \
+          | fzf --height=~10 --reverse --prompt="$prompt" \
+                --delimiter=$'\t' --with-nth=1 --header="$header") || return 1
+    [[ -n "$sel" ]] || return 1
+    print -r -- "${sel##*$'\t'}"
+    return 0
+  fi
+
+  # Numbered fallback. Needs a terminal to prompt on — we are called inside
+  # `$( … )`, so stdout is the capture pipe and stderr is what tells us whether
+  # there is a user on the other end. (`-r /dev/tty` is not the test: the node
+  # exists and is readable even with no controlling terminal, where the open
+  # then fails with "device not configured".)
+  if [[ ! -t 2 ]]; then
+    print -u2 -- "claude-profile: no terminal for the selector — pass a name explicitly"
+    return 1
+  fi
+  local n=${#disp} ans
+  print -r -u2 -- "$header"
+  for (( i = 1; i <= n; i++ )); do printf '  %*d) %s\n' ${#n} $i "$disp[i]" >&2; done
+  while true; do
+    print -n -u2 -- "$prompt"
+    read -r ans < /dev/tty 2>/dev/null || return 1
+    [[ -z "$ans" || "$ans" == [qQ] ]] && return 1
+    if [[ "$ans" == <-> ]] && (( ans >= 1 && ans <= n )); then
+      print -r -- "${keys[ans]}"
+      return 0
+    fi
+    print -u2 -- "  enter 1-${n} (empty or q to cancel)"
+  done
+}
+
+# ── CLI (with pickers) ──────────────────────────────────────────────────────
 
 claude-profile() {
-  # fzf pickers when a selection command is given without a name
-  if (( $+commands[fzf] )); then
-    case "$1" in
-      use)
-        if [[ -z "$2" ]]; then
-          local sel
-          sel=$(_claude_profile_py list 2>/dev/null \
-                | fzf --height=~10 --reverse --prompt='profile> ' \
-                      --with-nth=1,2,3 --delimiter=$'\t' \
-                      --header='select active profile (esc to cancel)') || return
-          set -- use "${sel%%$'\t'*}"
-        fi
-        ;;
-      account|auth|delete)
-        if [[ -z "$2" || "$2" == --* ]]; then
-          local _cmd="$1" sel
-          sel=$(_claude_profile_py accounts 2>/dev/null \
-                | fzf --height=~10 --reverse --prompt="${_cmd}> " \
-                      --with-nth=1,2 --delimiter=$'\t' \
-                      --header="select account for '${_cmd}' (esc to cancel)") || return
-          set -- "$_cmd" "${sel%%$'\t'*}" "${@:2}"
-        fi
-        ;;
-    esac
-  fi
+  # Selector screen when a selection command is given without a name.
+  case "$1" in
+    use)
+      if [[ -z "$2" ]]; then
+        local sel
+        sel=$(_claude_profile_py list 2>/dev/null \
+              | _claude_profile_pick 'profile> ' 'select active profile (esc/empty to cancel)') || return
+        set -- use "$sel"
+      fi
+      ;;
+    account|auth|delete)
+      if [[ -z "$2" || "$2" == --* ]]; then
+        local _cmd="$1" sel
+        sel=$(_claude_profile_py accounts 2>/dev/null \
+              | _claude_profile_pick "${_cmd}> " "select account for '${_cmd}' (esc/empty to cancel)") || return
+        set -- "$_cmd" "$sel" "${@:2}"
+      fi
+      ;;
+  esac
   _claude_profile_py "$@"
   local _rc=$?
   # A serial account swap changes the credential under the SAME config dir, so
