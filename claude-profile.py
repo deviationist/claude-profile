@@ -299,23 +299,21 @@ def compose_label(cfg, profile, account):
     included only when there's something to tell apart:
 
         profiles  accounts  label
-        1         1         "Personal"          nothing varies; name the seat
+        1         1         ""                  nothing varies — say nothing
         1         many      "Max 20x"           the account is the only variable
         many      1         "Work"              the profile is the only variable
         many      many      "Personal (Max 20x)"
 
-    The single-profile machine is the case worth getting right: on a host with
-    one profile and two subscriptions, "personal (max20x)" spends most of its
-    width on a constant.
+    The empty case is deliberate. One profile holding one subscription can only
+    ever be that seat, so a label there is decoration in a status line's
+    scarcest resource. Consumers treat "" as "render nothing" — it is a valid
+    answer, not a failure (`active` stays true).
     """
-    p = profile_display(cfg, profile)
     a = account_display(cfg, account) if (account and is_serial(cfg, profile)) else None
-    show_p = len(cfg.get("profiles") or {}) > 1
-    if show_p and a:
+    p = profile_display(cfg, profile) if len(cfg.get("profiles") or {}) > 1 else None
+    if p and a:
         return f"{p} ({a})"
-    if a:
-        return a
-    return p
+    return a or p or ""
 
 
 def profile_of_dir(cfg, d):
