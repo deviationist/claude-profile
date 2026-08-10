@@ -8,8 +8,12 @@ OAuth credential — environment persists bit-for-bit). Full docs: `README.md`.
 - Config (user-edited): `~/.config/claude-profile/config.json` —
   `profiles.<name>: {dir, paths[], accounts[], auto}` + `default_profile`.
 - State (tool-managed): `~/.local/state/claude-profile/` — `state.json`
-  (active toggle, usage cache) + `accounts/*.json` (non-secret metadata).
+  (active toggle, usage cache) + `accounts/*.json` (non-secret metadata, via
+  `accounts_dir()` — derived from `STATE_DIR` per call, never frozen, so a
+  redirected `STATE_DIR` can't resolve back onto real state).
   Secrets live only in the macOS Keychain (`claude-profile-parked-<name>`).
+  A saved account = **both** artifacts (parked credential + snapshot); a swap
+  needs the pair, which is what `ensure_account_ready()` checks.
 
 Commands (zsh layer sources `claude-profile.zsh`; core is `claude-profile.py`,
 python3 stdlib):
@@ -26,8 +30,16 @@ python3 stdlib):
   swap, fzf picker w/o name; refuses under live sessions, `--force` =
   SIGTERM/SIGKILL them first then swap — `ensure_swappable()`),
   `toggle` (switch to the NEXT account in the profile list, cyclic — flips
-  between two; same `--force`), `save <name>` (park current login as a named account —
-  bootstrap), `auth <name> [--email E] [--tui]` (re-authenticate via a
+  between two; same `--force`). Both swaps run `ensure_account_ready()` **before**
+  `ensure_swappable()` — a target with no parked credential is the never-captured /
+  post-`delete` case, so an interactive run offers the `auth` flow inline and
+  continues (auth needs no session guard, so the fixable half lands even when the
+  swap is still blocked); non-interactive dies with the `auth` line. Because a
+  first capture has no recorded uuid for `cmd_auth`'s mismatch guard to compare
+  against, the preflight rejects (and, if nothing pre-existed, discards) a capture
+  whose uuid equals the account being swapped *away* from. Interactivity goes
+  through the `interactive()` seam; `save <name>` (park current login as a named
+  account — bootstrap), `auth <name> [--email E] [--tui]` (re-authenticate via a
   throwaway scratch dir; drives `claude auth login --claudeai` = focused
   URL+paste-code sign-in, no first-run TUI, headless/SSH-friendly with no
   localhost callback; `--email` prefills, `--tui` falls back to the full

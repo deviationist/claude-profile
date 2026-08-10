@@ -43,7 +43,9 @@ STATE_DIR = os.path.join(
 )
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
-ACCOUNTS_DIR = os.path.join(STATE_DIR, "accounts")
+# Account snapshots live in accounts_dir() — derived from STATE_DIR on every
+# call rather than frozen here, so a caller that redirects STATE_DIR (tests)
+# cannot leave snapshot paths resolving to the real state dir.
 
 DEFAULT_CLAUDE_DIR = os.path.join(HOME, ".claude")
 LIVE_SERVICE_DEFAULT = "Claude Code-credentials"
@@ -179,12 +181,28 @@ FLAT_CACHE_KEYS = [
 
 
 def die(msg, code=1):
+    sys.stdout.flush()  # keep preceding chatter ahead of the error when piped
     print(f"claude-profile: {msg}", file=sys.stderr)
     sys.exit(code)
 
 
 def expand(p):
     return os.path.abspath(os.path.expanduser(p))
+
+
+def interactive():
+    """True when there is an operator on the other end to answer a prompt.
+    A single seam so callers never probe the streams directly (and tests can
+    drive both paths without owning stdin/stdout)."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def tilde(p):
+    """Inverse of expand() for display: re-contract $HOME to `~`."""
+    if not p:
+        return p
+    home = os.path.expanduser("~")
+    return "~" + p[len(home):] if p == home or p.startswith(home + os.sep) else p
 
 
 def atomic_write(path, data_str):
@@ -384,8 +402,12 @@ def save_claude_json(d, data):
 
 # ── account metadata snapshots (non-secret) ─────────────────────────────────
 
+def accounts_dir():
+    return os.path.join(STATE_DIR, "accounts")
+
+
 def snapshot_path(account):
-    return os.path.join(ACCOUNTS_DIR, f"{account}.json")
+    return os.path.join(accounts_dir(), f"{account}.json")
 
 
 def load_snapshot(account):
@@ -516,8 +538,8 @@ def saved_account_names():
 
 def all_snapshots():
     out = {}
-    if os.path.isdir(ACCOUNTS_DIR):
-        for fn in os.listdir(ACCOUNTS_DIR):
+    if os.path.isdir(accounts_dir()):
+        for fn in os.listdir(accounts_dir()):
             if fn.endswith(".json"):
                 name = fn[: -len(".json")]
                 snap = load_snapshot(name)
@@ -618,12 +640,16 @@ def ensure_swappable(d, force):
         return
     pids = ", ".join(str(s["pid"]) for s in sessions)
     if not force:
-        die(
-            f"{len(sessions)} live Claude session(s) in {d} (pids {pids}) — "
-            f"a swap under a running session can corrupt its credentials. "
-            f"Close them, or use --force to terminate them first.",
-            code=2,
-        )
+        # List them individually: "close your sessions" is only actionable if
+        # the operator can tell *which* terminals to go quit.
+        lines = [
+            f"{len(sessions)} live Claude session(s) in {tilde(d)} — a swap under a "
+            f"running session can corrupt its credentials:"
+        ]
+        for s in sessions:
+            lines.append(f"    pid {s['pid']}  {tilde(s.get('cwd')) or '?'}")
+        lines.append("  → quit them, or re-run with --force to terminate them first")
+        die("\n".join(lines), code=2)
     print(f"--force: terminating {len(sessions)} live Claude session(s) (pids {pids})", file=sys.stderr)
     kill_sessions(sessions)
     still = live_sessions(d)
@@ -1529,12 +1555,67 @@ def cmd_account(args):
     if current == args.name:
         print(f"\"{args.name}\" is already the live account of {profile}")
         return
+    ensure_account_ready(args.name, current)
     ensure_swappable(d, args.force)
     state = load_state()
     with mutation_lock():
         activate_account(cfg, state, profile, args.name)
     email = (load_snapshot(args.name) or {}).get("oauthAccount", {}).get("emailAddress", "?")
     print(f"{profile}: live account → \"{args.name}\" ({email}). Restart claude to use it.")
+
+
+def ensure_account_ready(target, current):
+    """Swap preflight for `target`. An account with no parked credential is
+    nothing to swap *to* — the ordinary never-captured / post-`delete` case
+    rather than operator error, so offer to run the `auth` flow inline. Auth
+    works in a scratch dir, so unlike the swap itself it is not blocked by live
+    sessions; running it first means a refused swap still leaves progress made.
+    Dies if the target can't be made ready."""
+    snap = load_snapshot(target)
+    blob = read_parked_cred(target)
+    if snap and blob is not None:
+        return
+    pristine = snap is None and blob is None  # nothing to clobber on revert
+    detail = "has never been authenticated" if pristine else (
+        "has a saved login but no parked credential" if snap else
+        "has a parked credential but no saved login")
+    print(f'account "{target}" {detail}, so there is nothing to swap to.')
+    hint = f"    claude-profile auth {target}"
+    if not interactive():
+        die(f"authenticate it first, then re-run:\n{hint}")
+
+    try:
+        ans = input(f'Authenticate "{target}" now? '
+                    'Live sessions are unaffected. [Y/n] ').strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans not in ("", "y", "yes"):
+        die(f"nothing changed — authenticate it later with:\n{hint}")
+
+    cur_uuid = (load_snapshot(current) or {}).get("accountUuid") if current else None
+    auth_account(target)
+
+    # With no prior snapshot, cmd_auth has no recorded uuid to compare the
+    # capture against — so its mismatch guard can't fire and signing into the
+    # wrong claude.ai account parks a duplicate of the live one under this
+    # name. Toggling away from `current` makes that case detectable here.
+    if cur_uuid and (load_snapshot(target) or {}).get("accountUuid") == cur_uuid:
+        if pristine:
+            with mutation_lock():
+                delete_parked_cred(target)
+                try:
+                    os.unlink(snapshot_path(target))
+                except FileNotFoundError:
+                    pass
+        die(f'that login is the same account as "{current}" — the sign-in used the '
+            f'wrong claude.ai account, so there is still nothing to swap to. '
+            + ("Discarded it; re-run" if pristine else
+               f'Keeping it; run `claude-profile delete {target}`, then re-run')
+            + f' and sign in as "{target}".')
+
+    # The swap continues from here — say so, or the command reads as if it
+    # stopped at the auth (especially when the session guard refuses next).
+    print(f'"{target}" is ready — continuing with the swap.')
 
 
 def cmd_toggle(args):
@@ -1551,6 +1632,7 @@ def cmd_toggle(args):
     else:
         target = accounts[0]  # live account unrecognized → start at the first
     d = profile_dir(cfg, profile)
+    ensure_account_ready(target, current)
     ensure_swappable(d, args.force)
     state = load_state()
     with mutation_lock():
@@ -1681,7 +1763,15 @@ def cmd_auth(args):
                 f"credential was not modified (live tokens refresh themselves); the "
                 f"parked copy applies at the next swap back to it."
             )
-    sys.exit(0)
+    return email
+
+
+def auth_account(name, **kw):
+    """`auth` as a callable step for commands that keep running afterwards
+    (see cmd_auth for the flow). Returns the captured email."""
+    fields = {"name": name, "email": None, "tui": False, "force": False, "no_launch": False}
+    fields.update(kw)
+    return cmd_auth(argparse.Namespace(**fields))
 
 
 def cmd_rotate(args):
