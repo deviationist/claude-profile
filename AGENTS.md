@@ -147,6 +147,19 @@ no credential swap while sessions run in the dir; passthrough (no
 `CLAUDE_CONFIG_DIR` honored verbatim (ccfind resumes through it); unknown usage
 = not exhausted (a launch is never blocked on a guess).
 
+Selector: the name-less forms of `use`/`account`/`auth`/`delete` open
+`_claude_profile_pick` — fzf when installed, a numbered `/dev/tty` prompt
+otherwise. fzf is optional and documented as such; the fallback prints a
+one-time nudge (`_claude_profile_fzf_hint`, silenced by
+`CLAUDE_PROFILE_NO_FZF_HINT`) which lives in `claude-profile()` rather than the
+picker because the picker runs inside `$( … )`, where a flag could not persist.
+
+Assets: `zsh tools/generate-readme-svg.zsh` regenerates the two README SVGs
+from a hermetic sandbox (fake `$HOME`, seeded config/snapshots, stub `security`
+so the Keychain is never opened, stub `fzf` that captures the picker's row
+list) and rewrites the README `<img>` refs. The text in both images is real
+output; only the window chrome is drawn.
+
 Tests: `test/run.sh` runs both suites — `test/test_claude_profile.py` (python
 core, stdlib unittest) and `test/{picker,wrapper}.bats` (zsh layer: the selector
 screen's fzf + numbered branches, the wrapper's resolution order, and the

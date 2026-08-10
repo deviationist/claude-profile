@@ -151,3 +151,36 @@ ROTATE_SPY='_claude_profile_py() {
   [[ "$output" != *"ROTATE"* ]]
   [[ "$output" == *"dir=[$FIXHOME/.claude-personal]"* ]]
 }
+
+# --- the fzf nudge ---------------------------------------------------------
+# fzf is optional, so the fallback must not nag: one line, once per shell,
+# silenceable, and never shown to someone who already has fzf.
+
+@test "without fzf: the selector nudges once, not once per use" {
+  run_cli_menu "$STUB_PY; claude-profile use; claude-profile use" 'profile> ' 1 1
+  [[ "$output" == *"install fzf for a searchable picker"* ]]
+  [ "$(grep -c 'install fzf' <<< "$output")" -eq 1 ]
+}
+
+@test "CLAUDE_PROFILE_NO_FZF_HINT silences the nudge" {
+  run_cli_menu "export CLAUDE_PROFILE_NO_FZF_HINT=1; $STUB_PY; claude-profile use" 'profile> ' 1
+  [[ "$output" != *"install fzf"* ]]
+  [[ "$output" == *"PY argv=[use personal]"* ]]
+}
+
+@test "with fzf installed there is no nudge" {
+  command -v fzf >/dev/null || skip "fzf not installed"
+  run env HOME="$FIXHOME" FZF_DEFAULT_OPTS="--select-1 --exit-0 --query=work" \
+    zsh -c 'source "$1" >/dev/null 2>&1; eval "$2"' _ "$CP_ZSH" "$STUB_PY; claude-profile use"
+  [[ "$output" == *"PY argv=[use work]"* ]]
+  [[ "$output" != *"install fzf"* ]]
+}
+
+@test "the nudge never reaches stdout, so it cannot corrupt the chosen key" {
+  # Capture stdout to a file while the menu (stderr) still reaches the pty, so
+  # the driver can answer it. `$(<f)` is a zsh redirect — PATH is empty here.
+  export OUTF="$BATS_TEST_TMPDIR/out"
+  run_cli_menu "$STUB_PY; claude-profile use > \$OUTF; print -r -- \"STDOUT:[\$(<\$OUTF)]\"" 'profile> ' 1
+  [[ "$output" == *"install fzf"* ]]              # …the nudge was shown,
+  [[ "$output" == *"STDOUT:[PY argv=[use personal]]"* ]]   # …but only on stderr.
+}
