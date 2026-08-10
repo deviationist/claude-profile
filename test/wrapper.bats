@@ -190,12 +190,35 @@ ROTATE_SPY='_claude_profile_py() {
 # the failure that would actually hurt is an escape sequence reaching a stream
 # the zsh layer splits on tabs.
 
-@test "colour forced: the porcelain streams stay byte-clean" {
+@test "colour forced: every porcelain stream stays byte-clean" {
+  # All four are parsed by field — by the zsh layer (resolve/dir/list/accounts)
+  # and by claude-usage (resolve --json, usage-json). One escape in any of them
+  # is a silent corruption, so they are checked together.
   run env HOME="$FIXHOME" CLAUDE_PROFILE_COLOR=always \
-    zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py list; _claude_profile_py accounts' _ "$CP_ZSH"
+    zsh -c 'source "$1" >/dev/null 2>&1
+            _claude_profile_py list
+            _claude_profile_py accounts
+            _claude_profile_py resolve
+            _claude_profile_py resolve --json
+            _claude_profile_py dir personal' _ "$CP_ZSH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"personal"* ]]
   [[ "$output" != *$'\033'* ]]
+}
+
+@test "colour forced: errors on stderr are coloured, and still say what they said" {
+  run env HOME="$FIXHOME" CLAUDE_PROFILE_COLOR=always \
+    zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py dir nope' _ "$CP_ZSH"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *$'\033'* ]]
+  [[ "$output" == *'unknown profile "nope"'* ]]
+}
+
+@test "a human-facing command colourises its result" {
+  run env HOME="$FIXHOME" CLAUDE_PROFILE_COLOR=always \
+    zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py use personal' _ "$CP_ZSH"
+  [[ "$output" == *$'\033'* ]]
+  [[ "$output" == *"active profile →"* ]]
 }
 
 @test "colour forced: status does colourise" {
