@@ -272,6 +272,55 @@ def is_serial(cfg, name):
     return len(profile_accounts(cfg, name)) > 1
 
 
+# ── display labels (consumed by `resolve --json`) ───────────────────────────
+# claude-profile owns the human-facing string for "which seat is this?" —
+# consumers (claude-usage, and through it the statusline) render `label`
+# verbatim rather than composing one from parts they'd have to guess at.
+# Casing/spacing is configured, never derived: a profile named `pm-me` or an
+# account named `max5x` must not be mangled by a title-case heuristic.
+
+def profile_display(cfg, name):
+    """Human-facing name for a profile: config `display`, else the raw name."""
+    return (cfg["profiles"].get(name) or {}).get("display") or name
+
+
+def account_display(cfg, account):
+    """Human-facing name for an account: the top-level `account_display` map
+    (account → string, mirroring the `keepalive` map), else the raw name."""
+    if not account:
+        return None
+    return (cfg.get("account_display") or {}).get(account) or account
+
+
+def compose_label(cfg, profile, account):
+    """"Personal (Max 5x)" for a serial profile, "Work" for a single-account
+    one. The account is only worth naming when the profile holds more than
+    one — otherwise the profile name already identifies the seat."""
+    p = profile_display(cfg, profile)
+    if account and is_serial(cfg, profile):
+        return f"{p} ({account_display(cfg, account)})"
+    return p
+
+
+def profile_of_dir(cfg, d):
+    """Reverse lookup: which profile owns this config dir? The statusline
+    knows the dir a session runs from (explicit CLAUDE_CONFIG_DIR, or derived
+    from the transcript path) but NOT a meaningful cwd, so dir → profile is
+    the question it needs answered — cwd resolution would name whatever
+    profile the statusline process happens to sit in. None if no profile
+    claims the dir. Two profiles on one dir: the one whose accounts list the
+    live account wins."""
+    d = expand(d)
+    matches = [n for n in cfg["profiles"] if profile_dir(cfg, n) == d]
+    if not matches:
+        return None
+    for n in matches:
+        current = current_account_of(cfg, n)
+        if current and current in profile_accounts(cfg, n):
+            return n
+    return matches[0]
+
+
 def account_keepalive(cfg, account):
     """Whether the keep-alive daemon should renew this account's refresh token.
     Default True; flip with `claude-profile keepalive <account> off`. Stored in
@@ -1450,15 +1499,85 @@ def cmd_status(args):
     sys.exit(0)
 
 
+RESOLVE_SCHEMA = 1
+
+
 def cmd_resolve(args):
+    """Who is this seat? Two output shapes:
+
+      (default)  `<profile>\\t<dir>\\t<auto>` — the wrapper porcelain, unchanged.
+      --json     the single-call contract for display consumers (claude-usage
+                 → the statusline): everything needed to label a seat, in one
+                 invocation, so a repainting statusline never fans out into
+                 several subprocesses.
+
+    `active:false` (exit 0, no error) is the ordinary "claude-profile is
+    installed but has nothing to say here" answer — no config file, or a dir
+    no profile claims. Consumers treat it as "render no label", not a failure.
+
+    Deliberately Keychain-free: identity comes from `.claude.json` + the
+    snapshot files, so this stays fast enough for the render path and can
+    never trigger a Keychain prompt.
+    """
+    json_out = getattr(args, "json", False)
     cfg = load_config(required=False)
     if cfg is None:
+        if json_out:
+            print(json.dumps({"schema": RESOLVE_SCHEMA, "active": False}))
         return  # no config → wrapper passthrough
-    state = load_state()
-    name, _ = resolve_profile(cfg, state, args.pwd or os.getcwd())
+
+    if getattr(args, "dir", None):
+        name = profile_of_dir(cfg, args.dir)
+        source = "dir"
+        if name is None:
+            if json_out:
+                print(json.dumps({"schema": RESOLVE_SCHEMA, "active": False}))
+                return
+            sys.exit(1)
+    else:
+        state = load_state()
+        name, source = resolve_profile(cfg, state, args.pwd or os.getcwd())
+
     d = profile_dir(cfg, name)
-    auto = "1" if (cfg["profiles"][name].get("auto") and is_serial(cfg, name)) else "0"
-    print(f"{name}\t{d}\t{auto}")
+    serial = is_serial(cfg, name)
+    auto = "1" if (cfg["profiles"][name].get("auto") and serial) else "0"
+
+    if not json_out:
+        print(f"{name}\t{d}\t{auto}")
+        return
+
+    account = current_account_of(cfg, name)
+    out = {
+        "schema": RESOLVE_SCHEMA,
+        "active": True,
+        "profile": name,
+        "display": profile_display(cfg, name),
+        "dir": d,
+        "account": account,
+        "account_display": account_display(cfg, account),
+        "serial": serial,
+        "auto": auto == "1",
+        "source": source,
+        "label": compose_label(cfg, name, account),
+    }
+    if getattr(args, "accounts", False):
+        # Every configured account, with the profile that owns it — the
+        # account→profile map `claude-usage --all` needs, folded into this
+        # same call so the multi-account view costs one extra invocation
+        # total (this, plus the existing `usage-json --all`).
+        live = {p: current_account_of(cfg, p) for p in cfg["profiles"]}
+        out["accounts"] = [
+            {
+                "name": acct,
+                "profile": p,
+                "display": account_display(cfg, acct),
+                "label": compose_label(cfg, p, acct),
+                "live": live.get(p) == acct,
+            }
+            for p in cfg["profiles"]
+            for acct in profile_accounts(cfg, p)
+        ]
+    print(json.dumps(out))
 
 
 def cmd_dir(args):
@@ -1982,6 +2101,11 @@ def main():
 
     p = sub.add_parser("resolve", help="print resolved profile for a cwd (wrapper porcelain)")
     p.add_argument("--pwd")
+    p.add_argument("--dir", help="resolve by config dir instead of cwd (reverse lookup)")
+    p.add_argument("--json", action="store_true",
+                   help="emit the single-call JSON contract (adds account + display label)")
+    p.add_argument("--accounts", action="store_true",
+                   help="with --json: include every configured account and its profile")
     p.set_defaults(func=cmd_resolve)
 
     p = sub.add_parser("dir", help="print a profile's config dir")

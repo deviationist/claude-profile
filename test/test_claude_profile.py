@@ -185,6 +185,97 @@ class ProfileFlags(unittest.TestCase):
         self.assertFalse(cp.account_keepalive({"keepalive": {"x": False}}, "x"))
 
 
+# ── display labels + `resolve --json` (the single-call contract) ────────────
+# claude-usage (and through it the statusline) asks exactly one question —
+# "which seat is this?" — and renders `label` verbatim. These tests pin the
+# shape it depends on.
+class DisplayLabels(unittest.TestCase):
+    CFG = {
+        "profiles": {
+            "personal": {"dir": "~/.claude-personal", "accounts": ["max20x", "max5x"],
+                         "display": "Personal"},
+            "work": {"dir": "~/.claude"},
+            "pm-me": {"dir": "~/.claude-pm", "accounts": ["solo"]},
+        },
+        "account_display": {"max5x": "Max 5x", "max20x": "Max 20x"},
+    }
+
+    def test_display_falls_back_to_raw_name(self):
+        # No title-case heuristic: an unconfigured name renders as written.
+        self.assertEqual(cp.profile_display(self.CFG, "pm-me"), "pm-me")
+        self.assertEqual(cp.account_display(self.CFG, "solo"), "solo")
+        self.assertEqual(cp.profile_display(self.CFG, "personal"), "Personal")
+        self.assertEqual(cp.account_display(self.CFG, "max5x"), "Max 5x")
+
+    def test_account_named_only_when_serial(self):
+        self.assertEqual(cp.compose_label(self.CFG, "personal", "max5x"), "Personal (Max 5x)")
+        # One account (or none): the profile name already identifies the seat.
+        self.assertEqual(cp.compose_label(self.CFG, "pm-me", "solo"), "pm-me")
+        self.assertEqual(cp.compose_label(self.CFG, "work", None), "work")
+
+
+class ResolveJson(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pdir = os.path.join(self.tmp, "personal")
+        os.makedirs(self.pdir)
+        self.cfg = {
+            "profiles": {
+                "personal": {"dir": self.pdir, "accounts": ["max20x", "max5x"],
+                             "display": "Personal"},
+                "work": {"dir": os.path.join(self.tmp, "work")},
+            },
+            "account_display": {"max5x": "Max 5x", "max20x": "Max 20x"},
+        }
+        self._load, self._state, self._cur = cp.load_config, cp.load_state, cp.current_account_of
+        cp.load_config = lambda required=True: self.cfg
+        cp.load_state = lambda: {}
+        cp.current_account_of = lambda cfg, p: "max5x" if p == "personal" else None
+
+    def tearDown(self):
+        cp.load_config, cp.load_state, cp.current_account_of = self._load, self._state, self._cur
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_resolve(self, **kw):
+        args = ns(**{"pwd": None, "dir": None, "json": True, "accounts": False, **kw})
+        with muted() as buf:
+            cp.cmd_resolve(args)
+        return json.loads(buf.getvalue())
+
+    def test_by_dir_reverse_lookup(self):
+        # The statusline knows the config dir, not a meaningful cwd.
+        out = self.run_resolve(dir=self.pdir)
+        self.assertTrue(out["active"])
+        self.assertEqual(out["profile"], "personal")
+        self.assertEqual(out["source"], "dir")
+        self.assertEqual(out["label"], "Personal (Max 5x)")
+        self.assertEqual(out["schema"], cp.RESOLVE_SCHEMA)
+
+    def test_unclaimed_dir_is_inactive_not_an_error(self):
+        out = self.run_resolve(dir=os.path.join(self.tmp, "nope"))
+        self.assertEqual(out, {"schema": cp.RESOLVE_SCHEMA, "active": False})
+
+    def test_no_config_is_inactive(self):
+        cp.load_config = lambda required=True: None
+        self.assertEqual(self.run_resolve(),
+                         {"schema": cp.RESOLVE_SCHEMA, "active": False})
+
+    def test_accounts_map_in_one_call(self):
+        out = self.run_resolve(dir=self.pdir, accounts=True)
+        by_name = {a["name"]: a for a in out["accounts"]}
+        self.assertEqual(by_name["max20x"]["profile"], "personal")
+        self.assertEqual(by_name["max20x"]["label"], "Personal (Max 20x)")
+        self.assertFalse(by_name["max20x"]["live"])
+        self.assertTrue(by_name["max5x"]["live"])
+
+    def test_plain_output_unchanged(self):
+        args = ns(pwd=self.tmp, dir=None, json=False, accounts=False)
+        with muted() as buf:
+            cp.cmd_resolve(args)
+        # `<profile>\t<dir>\t<auto>` — the wrapper porcelain, untouched.
+        self.assertEqual(len(buf.getvalue().strip().split("\t")), 3)
+
+
 # ── OAuth constant resolution (env → config → None) ─────────────────────────
 class OAuthSetting(unittest.TestCase):
     def setUp(self):

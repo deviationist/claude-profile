@@ -99,11 +99,27 @@ python3 stdlib):
   Persistent catch-up) + `loginctl enable-linger` so it fires while logged
   out; `_sctl()` injects `XDG_RUNTIME_DIR` for SSH sessions. Dispatched by
   `IS_MACOS`.
+- **`resolve`** — which profile applies here. Default output is the wrapper
+  porcelain `<name>\t<dir>\t<auto>`. **`--json`** is the single-call contract
+  for display consumers (`claude-usage --show-profile` → the statusline):
+  `{schema, active, profile, display, dir, account, account_display, serial,
+  auto, source, label}`, plus `accounts[]` (name/profile/display/label/live per
+  configured account) under `--accounts`. **`--dir PATH`** is a reverse lookup
+  (which profile owns this config dir) — the question a statusline must ask,
+  since it knows the session's dir but has no meaningful cwd; ties go to the
+  profile listing the live account. `label` is composed HERE and rendered
+  verbatim downstream: `display` / `account_display` from config, no
+  title-casing heuristics, account in parentheses only when the profile is
+  serial. `{"schema":1,"active":false}` at exit 0 = no config / unclaimed dir —
+  an ordinary outcome, not an error. Invariants: **never touch the Keychain**
+  on this path (`.claude.json` + snapshots only; it runs on a render loop), and
+  don't change the plain output shape — the zsh wrapper parses it.
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.
 - `claude-usage`/statusline follow the resolved profile via a
-  mtime-guarded precmd hook (`CLAUDE_USAGE_DIR`).
+  mtime-guarded precmd hook (`CLAUDE_USAGE_DIR`), and label the seat via
+  `resolve --json --dir` (above).
 
 Safety invariants (do not regress): secrets never on disk / never in argv;
 no credential swap while sessions run in the dir; passthrough (no

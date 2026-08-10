@@ -57,6 +57,8 @@ edit this by hand; the CLI reads it:
   "profiles": {
     "personal": {
       "dir": "~/.claude",           // the Claude Code config dir
+      "display": "Personal",        // OPTIONAL — human-facing name for the seat
+                                    // label (see "Seat labels"); default: the key
       "paths": [],                  // cwd prefixes that auto-select this profile
       "accounts": ["max20x", "max5x"],  // credential slots (order = rotation order)
       "auto": true,                 // rotate off an exhausted account at launch
@@ -74,6 +76,10 @@ edit this by hand; the CLI reads it:
   },
   "keepalive": {                    // OPTIONAL — per-account; omitted account = kept alive (true)
     "max5x": false                  // don't auto-renew this account's refresh token
+  },
+  "account_display": {              // OPTIONAL — per-account seat-label names
+    "max20x": "Max 20x",            // omitted account renders as its own key
+    "max5x":  "Max 5x"
   },
   "notify_email": "you@example.com" // OPTIONAL — email via the system `sendmail` if keep-alive fails
 }
@@ -170,6 +176,10 @@ claude-profile auto on|off         toggle launch-time auto-rotation
 claude-profile usage [--fresh]     per-account usage (5h/7d windows, resets)
 claude-profile usage-json [--all|--profile P|--account A]   raw usage JSON per
                                    account (porcelain for `claude-usage --all`)
+claude-profile resolve [--pwd P]   which profile applies here → "<name>\t<dir>\t<auto>"
+claude-profile resolve --json [--dir D] [--accounts]   the same question as JSON,
+                                   incl. the live account and its seat label
+                                   (--dir = reverse lookup; see "Seat labels")
 claude-profile anchor-window [--all|--profile P|--account A]   anchor a 5-hour
                                    window per account via one POST /v1/messages
                                    (serial-safe; no session/swap — see below)
@@ -307,6 +317,45 @@ the [OAuth constants](#oauth-constants) (the User-Agent especially — Cloudflar
 rejects the default). **This is an unofficial spoof, not a supported API
 surface**, and could change; the orchestrator degrades gracefully if it starts
 being rejected.
+
+## Seat labels (`resolve --json`)
+
+Anything that displays "which subscription am I burning right now?" —
+[`claude-usage --show-profile`](../claude-usage), and through it the
+statusline — gets the answer here, in **one call**:
+
+```console
+$ claude-profile resolve --json --dir ~/.claude-personal
+{"schema":1,"active":true,"profile":"personal","display":"Personal",
+ "dir":"/Users/me/.claude-personal","account":"max5x","account_display":"Max 5x",
+ "serial":true,"auto":true,"source":"dir","label":"Personal (Max 5x)"}
+```
+
+`label` is the whole point: consumers render it **verbatim** rather than
+stitching one together from parts they'd have to guess at. Which means the
+naming rules live here, and they're configured, never derived:
+
+- `display` (per profile) and `account_display` (per account) supply the
+  human-facing casing; an unconfigured name renders exactly as written, so a
+  profile called `pm-me` stays `pm-me` instead of being title-cased into
+  nonsense.
+- The account appears in parentheses **only when the profile is serial**. One
+  subscription needs no disambiguation, so it renders as just `Personal`.
+
+`--dir` is a **reverse lookup** (which profile owns this config dir?) and is
+the right question for a statusline: it knows the dir a session belongs to,
+but its own cwd is meaningless. Without `--dir` it falls back to normal
+cwd resolution. `--accounts` adds every configured account with its profile
+and label — the map a multi-account view needs, folded into this same call so
+nothing has to fan out.
+
+`{"schema":1,"active":false}` (exit 0) is the ordinary "nothing to say here"
+answer — no config file, or a dir no profile claims. It isn't an error, and
+consumers treat it as "render no label".
+
+The call is deliberately **Keychain-free** — identity comes from `.claude.json`
+plus the snapshot files — so it stays fast enough for a render path and can
+never trigger a Keychain prompt. Keep it that way.
 
 ## How serial switching works
 
