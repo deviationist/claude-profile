@@ -113,8 +113,11 @@ python3 stdlib):
   since it knows the session's dir but has no meaningful cwd; ties go to the
   profile listing the live account. `label` is composed HERE and rendered
   verbatim downstream: `display` / `account_display` from config, no
-  title-casing heuristics, account in parentheses only when the profile is
-  serial. `{"schema":1,"active":false}` at exit 0 = no config / unclaimed dir —
+  title-casing heuristics, and each half included only when it disambiguates
+  (profile named only if >1 profile exists, account only if the profile is
+  serial; neither → **empty label**, a valid answer rather than a failure), so a
+  single-profile host renders `Max 20x` rather than `personal (max20x)`, and a
+  one-profile-one-account host renders nothing at all. `{"schema":1,"active":false}` at exit 0 = no config / unclaimed dir —
   an ordinary outcome, not an error. Invariants: **never touch the Keychain**
   on this path (`.claude.json` + snapshots only; it runs on a render loop), and
   don't change the plain output shape — the zsh wrapper parses it.
