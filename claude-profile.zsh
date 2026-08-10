@@ -46,6 +46,23 @@ _claude_profile_py() {
 # in ./.env (sourced function-locally); a same-invocation env assignment
 # (CLAUDE_CAFFEINATE=0 claude) wins over .env.
 _claude_exec() {
+  # Warm the statusline's caches for the seat we are about to launch into.
+  # The statusline never blocks — it renders whatever is already cached and
+  # refreshes behind itself. Invisible in a shell; very visible in Claude
+  # Code, which paints the status line ONCE at startup and (with no
+  # refreshInterval set) not again until you do something, so a cold cache
+  # reads as a segment that is simply missing until your first message.
+  # This function is the single choke point every launch path passes through
+  # (claude / claude-with / claude-default, and every early return in
+  # claude()), and by here CLAUDE_CONFIG_DIR names the seat exactly as
+  # claude-usage itself would resolve it. Backgrounded, and a no-op when the
+  # caches are already fresh — Claude takes far longer to boot than this
+  # takes. One call covers the account label and the usage bars alike.
+  if (( $+functions[claude-usage] )); then
+    ( claude-usage --dir "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" \
+        --show-profile >/dev/null 2>&1 & ) >/dev/null 2>&1
+  fi
+
   if [[ "$OSTYPE" == darwin* ]]; then
     local _on="${CLAUDE_CAFFEINATE-}" _flags="${CLAUDE_CAFFEINATE_FLAGS-}"
     local CLAUDE_CAFFEINATE CLAUDE_CAFFEINATE_FLAGS
