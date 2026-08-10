@@ -106,11 +106,15 @@ export SEEDDIR="$seeddir"
 # until a `rehash` — creating it later silently ran the operator's real fzf.
 cat > "$tmp/bin/fzf" <<'STUB'
 #!/bin/sh
+# Record the argv too: the prompt and header strings belong to the picker, so
+# reading them back here keeps the drawn chrome from drifting away from what
+# the tool actually passes (it already had: the header was stale by a word).
+printf '%s\n' "$@" > "$FZF_ARGS"
 cat > "$FZF_CAPTURE"
 exit 130
 STUB
 chmod +x "$tmp/bin/fzf"
-export FZF_CAPTURE="$tmp/fzf-rows"
+export FZF_CAPTURE="$tmp/fzf-rows" FZF_ARGS="$tmp/fzf-args"
 
 # ---- seeded account metadata ----------------------------------------------
 # Non-secret snapshots: what `status` reads to show an account's email and the
@@ -167,12 +171,15 @@ BG='#1e1e2e'  BAR='#181825'  FG='#cdd6f4'  DIMC='#9399b2'
 DOT1='#f38ba8' DOT2='#f9e2af' DOT3='#a6e3a1'
 # fzf's own furniture, in its default roles: blue prompt, red pointer, yellow
 # match counter, and a lifted background on the current line.
-ACC='#89b4fa'   # prompt '>'
-PTR='#f38ba8'   # pointer '>'
+ACC='#89dceb'   # prompt string
+PTR='#f38ba8'   # current-line marker bar
 INFO='#f9e2af'  # match counter
+HDR='#94e2d5'   # header
+RULE='#45475a'  # the solid rule fzf draws on the info line
+GUT='#313244'   # the gutter bar every list row carries
 HL='#313244'    # current-line background
 FONT="'Cascadia Code','Fira Code',SFMono-Regular,Consolas,Menlo,monospace"
-integer FS=13 LH=20 TH=30 PX=20 PY=14 SLACK=24
+integer FS=13 LH=20 TH=30 PX=20 PY=14 SLACK=24 MINCOLS=52
 
 # Terminal grid: every character is pinned to its own cell, so a row occupies
 # exactly (columns × cw) whichever font the renderer falls back to — which is
@@ -185,17 +192,20 @@ xrun() { print -rn -- "${(j: :)XCOL[$1+1,$1+$2]}" }
 xesc() { local s=$1; s=${s//\&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; print -rn -- "$s" }
 
 # emit_svg <lines-array-name> <out-file> <title> <aria>
-# Each entry: TYPE|content — b=blank, t=plain, c=dim, p=fzf current row,
-# n=fzf other row, q=fzf prompt row, h=fzf header row, i=fzf match counter.
+# Each entry: TYPE|content — b=blank, t=plain, c=dim, and the fzf frame:
+# q=prompt (+cursor), i=match counter + separator rule, h=header, n=row,
+# p=current row.
+# Everything in the fzf frame except q sits at column 2, as fzf indents it.
 emit_svg() {
   local -a _lines=("${(@P)1}")
   local out=$2 title=$3 aria=$4 entry typ body
   integer maxcols=0 n
   for entry in "${_lines[@]}"; do
     body=${entry#*|}; n=${#body}
-    [[ ${entry%%\|*} == (p|n|q) ]] && (( n += 2 ))
+    [[ ${entry%%\|*} == (p|n|h|i) ]] && (( n += 2 ))
     (( n > maxcols )) && maxcols=$n
   done
+  (( maxcols < MINCOLS )) && maxcols=$MINCOLS
   integer W=$(( PX * 2 + maxcols * cw + 6 + SLACK ))
   integer H=$(( TH + PY + ${#_lines} * LH + PY ))
   {
@@ -215,13 +225,22 @@ emit_svg() {
         b) ;;
         t) print -r -- "$T fill=\"$FG\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>" ;;
         c) print -r -- "$T fill=\"$DIMC\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>" ;;
-        h) print -r -- "$T fill=\"$DIMC\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
-        n) print -r -- "$T fill=\"$FG\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
-        i) print -r -- "$T fill=\"$INFO\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
-        p) # fzf lifts the background of the line the pointer is on
+        n) # every list row carries the gutter bar; only the current one is pink
+           print -r -- "  <rect x=\"$PX\" y=\"$(( y - FS - 3 ))\" width=\"3\" height=\"$LH\" fill=\"$GUT\"/>"
+           print -r -- "$T fill=\"$FG\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
+        i) # fzf's --separator draws the rule on the info line itself, from just
+           # after the match counter out to the right edge.
+           integer rx=$(( PX + (${#body} + 3) * cw ))
+           print -r -- "  <rect x=\"$rx\" y=\"$(( y - FS / 2 + 1 ))\" width=\"$(( W - rx - PX ))\" height=\"1\" fill=\"$RULE\"/>"
+           print -r -- "$T fill=\"$INFO\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
+        h) print -r -- "$T fill=\"$HDR\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
+        p) # the current line: lifted background and a marker bar in the gutter
            print -r -- "  <rect x=\"0\" y=\"$(( y - FS - 3 ))\" width=\"$W\" height=\"$LH\" fill=\"$HL\"/>"
-           print -r -- "$T fill=\"$FG\"><tspan x=\"$XCOL[1]\" fill=\"$PTR\">&gt;</tspan><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
-        q) print -r -- "$T fill=\"$FG\"><tspan x=\"$XCOL[1]\" fill=\"$ACC\">&gt;</tspan><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
+           print -r -- "  <rect x=\"$PX\" y=\"$(( y - FS - 3 ))\" width=\"3\" height=\"$LH\" fill=\"$PTR\"/>"
+           print -r -- "$T fill=\"$FG\"><tspan x=\"$(xrun 2 ${#body})\">$(xesc "$body")</tspan></text>" ;;
+        q) # the prompt string sits at column 0, with the block cursor after it
+           print -r -- "  <rect x=\"$XCOL[${#body}+1]\" y=\"$(( y - FS + 1 ))\" width=\"8\" height=\"$(( FS + 3 ))\" fill=\"$FG\" opacity=\"0.75\"/>"
+           print -r -- "$T fill=\"$ACC\"><tspan x=\"$(xrun 0 ${#body})\">$(xesc "$body")</tspan></text>" ;;
       esac
       (( i++ ))
     done
@@ -231,22 +250,42 @@ emit_svg() {
 
 # ---- compose ---------------------------------------------------------------
 typeset -a status_lines
-status_lines=('t|$ claude-profile' 'b|')
+status_lines=('t|% claude-profile' 'b|')
 local ln
 for ln in "${(@f)status_out}"; do
   [[ -z $ln ]] && { status_lines+=('b|'); continue }
   status_lines+=("t|$ln")
 done
 
+# Prompt and header are read back from the recorded argv, not retyped here.
+typeset -a fzf_argv
+fzf_argv=("${(@f)$(<"$FZF_ARGS")}")
+local fzf_prompt='' fzf_header='' a
+for a in "${fzf_argv[@]}"; do
+  case $a in
+    --prompt=*) fzf_prompt=${a#--prompt=} ;;
+    --header=*) fzf_header=${a#--header=} ;;
+  esac
+done
+fzf_prompt=${fzf_prompt%% #}          # fzf renders the trailing pad as the gap
+
 typeset -a selector_lines
-selector_lines=('t|$ claude-profile use' 'b|')
+selector_lines=('t|% claude-profile use' 'b|')
 integer nrows=${#sel_rows}
-selector_lines+=("q|")                                   # the fzf query line
-selector_lines+=("i|${nrows}/${nrows}")                   # fzf's match counter
-selector_lines+=("h|select active profile (esc to cancel)")
-integer j=1
+selector_lines+=("q|$fzf_prompt")
+selector_lines+=("i|${nrows}/${nrows}")
+selector_lines+=("h|$fzf_header")
+# The pointer rests on the row you would actually be switching *to* — the
+# first one the porcelain does not mark active.
+integer cur=0 j=1
 for ln in "${sel_rows[@]}"; do
-  (( j == 1 )) && selector_lines+=("p|$ln") || selector_lines+=("n|$ln")
+  [[ $ln != *active* && $cur == 0 ]] && cur=$j
+  (( j++ ))
+done
+(( cur )) || cur=1
+j=1
+for ln in "${sel_rows[@]}"; do
+  (( j == cur )) && selector_lines+=("p|$ln") || selector_lines+=("n|$ln")
   (( j++ ))
 done
 
