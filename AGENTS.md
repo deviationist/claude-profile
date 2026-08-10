@@ -123,6 +123,17 @@ python3 stdlib):
   an ordinary outcome, not an error. Invariants: **never touch the Keychain**
   on this path (`.claude.json` + snapshots only; it runs on a render loop), and
   don't change the plain output shape — the zsh wrapper parses it.
+- **`_claude_exec`** — the single choke point every launch path funnels through
+  (`claude` incl. all its early returns, `claude-with`, `claude-default`).
+  Besides the macOS `caffeinate` wrap it **warms claude-usage's caches** for the
+  seat being launched (`claude-usage --dir "${CLAUDE_CONFIG_DIR:-~/.claude}"
+  --show-profile`, backgrounded, gated on the function existing). Reason: the
+  statusline never blocks, and Claude Code paints it ONCE at startup — with no
+  `refreshInterval` set it doesn't paint again until the user acts, so a cold
+  cache reads as a missing segment rather than a late one. We're the only
+  process that knows the seat *before* Claude starts. Put launch-time
+  side effects here, not in `claude()` — that function returns early in three
+  places and each one would have to repeat them.
 - **`claude-with <profile> [args]`** — one-shot launch against a profile.
 - **`claude-switch [<name>]`** — alias for `claude-profile use`.
 - **`claude-default`** — one-shot with `CLAUDE_CONFIG_DIR` unset.
