@@ -184,3 +184,28 @@ ROTATE_SPY='_claude_profile_py() {
   [[ "$output" == *"install fzf"* ]]              # …the nudge was shown,
   [[ "$output" == *"STDOUT:[PY argv=[use personal]]"* ]]   # …but only on stderr.
 }
+
+# --- colour stays out of the porcelain -------------------------------------
+# The unit tests cover the gate; these run the real binary end to end, because
+# the failure that would actually hurt is an escape sequence reaching a stream
+# the zsh layer splits on tabs.
+
+@test "colour forced: the porcelain streams stay byte-clean" {
+  run env HOME="$FIXHOME" CLAUDE_PROFILE_COLOR=always \
+    zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py list; _claude_profile_py accounts' _ "$CP_ZSH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"personal"* ]]
+  [[ "$output" != *$'\033'* ]]
+}
+
+@test "colour forced: status does colourise" {
+  run env HOME="$FIXHOME" CLAUDE_PROFILE_COLOR=always \
+    zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py status' _ "$CP_ZSH"
+  [[ "$output" == *$'\033'* ]]
+}
+
+@test "piped status carries no colour by default" {
+  run env HOME="$FIXHOME" \
+    zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py status' _ "$CP_ZSH"
+  [[ "$output" != *$'\033'* ]]
+}
