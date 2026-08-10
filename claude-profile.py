@@ -184,9 +184,16 @@ FLAT_CACHE_KEYS = [
 ]
 
 
-def die(msg, code=1):
+def die(msg, code=1, style="red"):
     sys.stdout.flush()  # keep preceding chatter ahead of the error when piped
-    print(f"claude-profile: {msg}", file=sys.stderr)
+    # Only the first line is styled here. Multi-line messages (the live-session
+    # refusal) colour their own body, and blanket-reddening those would flatten
+    # the distinction between the complaint, the evidence and the way out.
+    # Gate on stderr, not stdout: an error is still worth colouring when the
+    # command's own output is being piped somewhere.
+    head, _, rest = msg.partition("\n")
+    out = c(f"claude-profile: {head}", style, stream=sys.stderr)
+    print(out + ("\n" + rest if rest else ""), file=sys.stderr)
     sys.exit(code)
 
 
@@ -212,20 +219,20 @@ _SGR = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33",
         "blue": "34", "magenta": "35", "cyan": "36"}
 
 
-def color_enabled():
+def color_enabled(stream=None):
     mode = os.environ.get("CLAUDE_PROFILE_COLOR", "auto")
     if mode == "always":
         return True
     if mode == "never" or "NO_COLOR" in os.environ:
         return False
-    return sys.stdout.isatty()
+    return (stream or sys.stdout).isatty()
 
 
-def c(text, *styles):
+def c(text, *styles, stream=None):
     """Wrap `text` in SGR styles when colour is on. Callers must pad/align
     BEFORE colouring — escape sequences count toward str width but not toward
     what the terminal draws."""
-    if not text or not styles or not color_enabled():
+    if not text or not styles or not color_enabled(stream):
         return text
     return "\033[" + ";".join(_SGR[s] for s in styles) + "m" + text + "\033[0m"
 
@@ -742,8 +749,8 @@ def swap_context(profile, current, target):
     things you need to decide whether it's worth quitting sessions over."""
     now = f"stays on {account_label(current)}" if current else \
         "has no recognized live account"
-    return f"nothing changed — profile {profile} {now}; " \
-           f"the swap would go to {account_label(target)}"
+    return c(f"nothing changed — profile {profile} {now}; "
+             f"the swap would go to {account_label(target)}", "yellow", stream=sys.stderr)
 
 
 def ensure_swappable(d, force, context=None):
@@ -764,12 +771,16 @@ def ensure_swappable(d, force, context=None):
             f"running session can corrupt its credentials:"
         ]
         for s in sessions:
-            lines.append(f"    pid {s['pid']}  {tilde(s.get('cwd')) or '?'}")
+            lines.append(c(f"    pid {s['pid']}  {tilde(s.get('cwd')) or '?'}",
+                           "dim", stream=sys.stderr))
         if context:
             lines.append(f"  {context}")
-        lines.append("  → quit them, or re-run with --force to terminate them first")
-        die("\n".join(lines), code=2)
-    print(f"--force: terminating {len(sessions)} live Claude session(s) (pids {pids})", file=sys.stderr)
+        # The way out is the actionable part, so it gets the one accent colour.
+        lines.append(c("  → quit them, or re-run with --force to terminate them first",
+                       "cyan", stream=sys.stderr))
+        die("\n".join(lines), code=2, style="yellow")
+    print(c(f"--force: terminating {len(sessions)} live Claude session(s) (pids {pids})",
+            "yellow", stream=sys.stderr), file=sys.stderr)
     kill_sessions(sessions)
     still = live_sessions(d)
     if still:
@@ -1707,16 +1718,17 @@ def cmd_use(args):
     if args.name in ("default", "clear", "off"):
         state.pop("active_profile", None)
         save_state(state)
-        print("profile toggle cleared — path rules / default_profile apply")
+        print(c("profile toggle cleared — path rules / default_profile apply", "green"))
         return
     if args.name not in cfg["profiles"]:
         die(f"unknown profile \"{args.name}\" (have: {', '.join(cfg['profiles'])})")
     state["active_profile"] = args.name
     save_state(state)
-    print(f"active profile → {args.name} ({cfg['profiles'][args.name]['dir']}) — all shells")
+    print(c("active profile → ", "green") + c(args.name, "bold", "green")
+          + c(f" ({cfg['profiles'][args.name]['dir']}) — all shells", "dim"))
     for pname, p in cfg["profiles"].items():
         if p.get("paths"):
-            print(f"note: path rules still outrank the toggle (e.g. {pname}: {', '.join(p['paths'])})")
+            print(c(f"note: path rules still outrank the toggle (e.g. {pname}: {', '.join(p['paths'])})", "dim"))
             break
 
 
@@ -1745,7 +1757,8 @@ def cmd_save(args):
         state.setdefault("active_account", {})[profile] = args.name
         save_state(state)
     email = cj["oauthAccount"].get("emailAddress", "?")
-    print(f"saved live credential of {profile} ({email}) as account \"{args.name}\"")
+    print(c(f"saved live credential of {profile} ({email}) as account ", "green")
+          + c(f'"{args.name}"', "bold", "green"))
     if args.name not in profile_accounts(cfg, profile):
         print(
             f"note: \"{args.name}\" is not listed in profile \"{profile}\"'s accounts — "
@@ -1762,7 +1775,7 @@ def cmd_account(args):
     d = profile_dir(cfg, profile)
     current = current_account_of(cfg, profile)
     if current == args.name:
-        print(f"\"{args.name}\" is already the live account of {profile}")
+        print(c(f"\"{args.name}\" is already the live account of {profile}", "yellow"))
         return
     ensure_account_ready(args.name, current)
     ensure_swappable(d, args.force, swap_context(profile, current, args.name))
@@ -1770,7 +1783,8 @@ def cmd_account(args):
     with mutation_lock():
         activate_account(cfg, state, profile, args.name)
     email = (load_snapshot(args.name) or {}).get("oauthAccount", {}).get("emailAddress", "?")
-    print(f"{profile}: live account → \"{args.name}\" ({email}). Restart claude to use it.")
+    print(c(f"{profile}: live account → ", "green") + c(f'"{args.name}"', "bold", "green")
+          + c(f" ({email}). Restart claude to use it.", "dim"))
 
 
 def ensure_account_ready(target, current):
@@ -1847,7 +1861,9 @@ def cmd_toggle(args):
     with mutation_lock():
         activate_account(cfg, state, profile, target)
     email = (load_snapshot(target) or {}).get("oauthAccount", {}).get("emailAddress", "?")
-    print(f"{profile}: \"{current or '?'}\" → \"{target}\" ({email}). Restart claude to use it.")
+    print(c(f"{profile}: ", "green") + c(f'"{current or "?"}"', "dim") + c(" → ", "green")
+          + c(f'"{target}"', "bold", "green")
+          + c(f" ({email}). Restart claude to use it.", "dim"))
 
 
 def cmd_delete(args):
@@ -1874,7 +1890,8 @@ def cmd_delete(args):
                 del state["active_account"][prof]
         (state.get("usage") or {}).pop(name, None)
         save_state(state)
-    print(f"deleted \"{name}\" — parked credential and snapshot removed (live logins untouched)")
+    print(c("deleted ", "green") + c(f'"{name}"', "bold", "green")
+          + c(" — parked credential and snapshot removed (live logins untouched)", "dim"))
     for p in live_in:
         print(
             f"note: \"{name}\" is still the live login of profile \"{p}\" — it now shows "
@@ -1912,7 +1929,7 @@ def cmd_auth(args):
         )
         print()
         if args.tui:
-            print("  (--tui: complete the login in the client, then quit it with Ctrl+C twice)")
+            print(c("  (--tui: complete the login in the client, then quit it with Ctrl+C twice)", "dim"))
             subprocess.call([claude_bin], env=env)
         else:
             cmd = [claude_bin, "auth", "login", "--claudeai"]
@@ -1962,7 +1979,8 @@ def cmd_auth(args):
     # hygiene: no credentials linger outside the parked item
     delete_live_cred(scratch)
     shutil.rmtree(scratch, ignore_errors=True)
-    print(f"parked fresh credentials for \"{name}\" ({email}).")
+    print(c("parked fresh credentials for ", "green") + c(f'"{name}"', "bold", "green")
+          + c(f" ({email}).", "dim"))
 
     cfg = load_config()
     for pname in cfg["profiles"]:
@@ -1989,7 +2007,7 @@ def cmd_rotate(args):
     accounts = profile_accounts(cfg, profile)
     if len(accounts) < 2:
         if not args.quiet:
-            print(f"profile \"{profile}\" has {len(accounts)} account(s) — nothing to rotate")
+            print(c(f"profile \"{profile}\" has {len(accounts)} account(s) — nothing to rotate", "yellow"))
         return
     d = profile_dir(cfg, profile)
     state = load_state()
@@ -2013,7 +2031,7 @@ def cmd_rotate(args):
 
     if current is None:
         if not args.quiet:
-            print("live account unrecognized — run `claude-profile save <name>` first")
+            print(c("live account unrecognized — run `claude-profile save <name>` first", "yellow"))
         return
 
     limits, _ = account_usage(cfg, state, profile, current)
@@ -2048,12 +2066,13 @@ def cmd_rotate(args):
         break
     if target is None:
         if not args.quiet:
-            print("no rotation target: every other account is exhausted or unsaved")
+            print(c("no rotation target: every other account is exhausted or unsaved", "yellow"))
         return
 
     why = "exhausted" if cur_exhausted else "rotation requested"
     if args.dry_run:
-        print(f"would rotate {profile}: \"{current}\" ({why}) → \"{target}\"")
+        print(c(f"would rotate {profile}: \"{current}\" ({why}) → ", "cyan")
+              + c(f'"{target}"', "bold", "cyan"))
         return
     sessions = live_sessions(d)
     if sessions:
@@ -2067,7 +2086,8 @@ def cmd_rotate(args):
         return
     with mutation_lock():
         activate_account(cfg, state, profile, target)
-    print(f"claude-profile: rotated {profile}: \"{current}\" ({why}) → \"{target}\"", file=sys.stderr)
+    print(c(f"claude-profile: rotated {profile}: \"{current}\" ({why}) → \"{target}\"",
+            "green", stream=sys.stderr), file=sys.stderr)
 
 
 def cmd_auto(args):
@@ -2075,7 +2095,8 @@ def cmd_auto(args):
     profile = pick_profile(cfg, args)
     cfg["profiles"][profile]["auto"] = args.mode == "on"
     save_config(cfg)
-    print(f"profile \"{profile}\": auto-rotate {args.mode}")
+    print(c(f"profile \"{profile}\": auto-rotate ", "green")
+          + c(args.mode, "bold", "green" if args.mode == "on" else "yellow"))
 
 
 def cmd_keepalive(args):
@@ -2090,15 +2111,18 @@ def cmd_keepalive(args):
             if args.account not in known:
                 die(f"unknown account \"{args.account}\"")
             targets = [args.account]
-        print("keep-alive (refresh-token renewal):")
+        print(c("keep-alive (refresh-token renewal):", "bold"))
         for a in targets:
-            print(f"  {a:<12} {'on' if account_keepalive(cfg, a) else 'OFF'}")
+            ka = account_keepalive(cfg, a)
+            print(f"  {a:<12} " + c("on" if ka else "OFF", "green" if ka else "yellow"))
         return
     if not args.account or args.account not in known:
         die(f"unknown account \"{args.account or ''}\" — see `claude-profile keepalive`")
     cfg.setdefault("keepalive", {})[args.account] = args.mode == "on"
     save_config(cfg)
-    print(f"keep-alive for \"{args.account}\": {'on' if args.mode == 'on' else 'OFF'}")
+    ka = args.mode == "on"
+    print(c(f"keep-alive for \"{args.account}\": ", "green")
+          + c("on" if ka else "OFF", "bold", "green" if ka else "yellow"))
     if args.mode == "off":
         print("  its refresh token will now age out on its own — `claude-profile auth "
               f"{args.account}` (or keepalive on) before it expires")
@@ -2110,7 +2134,7 @@ def cmd_usage(args):
     profile = pick_profile(cfg, args)
     for acct in profile_accounts(cfg, profile):
         limits, age = account_usage(cfg, state, profile, acct, ttl=0 if args.fresh else USAGE_TTL)
-        print(f"{acct}: {fmt_limits(limits)}")
+        print(c(f"{acct}", "bold") + f": {fmt_limits(limits)}")
 
 
 def cmd_usage_json(args):

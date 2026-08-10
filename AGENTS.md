@@ -147,13 +147,17 @@ no credential swap while sessions run in the dir; passthrough (no
 `CLAUDE_CONFIG_DIR` honored verbatim (ccfind resumes through it); unknown usage
 = not exhausted (a launch is never blocked on a guess).
 
-Colour: `status` is the only command that emits SGR — `color_enabled()` gates
+Colour: the human-facing commands emit SGR — `color_enabled()` gates
 on isatty, honours `NO_COLOR`, and takes `$CLAUDE_PROFILE_COLOR=always|never`
 (`always` wins over `NO_COLOR`, as `ls --color=always` does; the README-SVG
 generator relies on it). **Invariant: no porcelain may ever emit an escape** —
 `list`/`accounts`/`resolve --json`/`usage-json` are parsed by field by the zsh
 layer and claude-usage; there are tests for this at both levels. `c()` colours,
-callers pad first (escapes count toward str width, not toward drawn width).
+callers pad first (escapes count toward str width, not toward drawn width);
+`c(..., stream=sys.stderr)` gates on stderr for messages that go there.
+`die(msg, style=)` colours only the message's FIRST line — multi-line refusals
+(the live-session guard) style their own body, so the complaint, the evidence
+and the way out stay distinguishable.
 
 Selector: the name-less forms of `use`/`account`/`auth`/`delete` open
 `_claude_profile_pick` — fzf when installed, a numbered `/dev/tty` prompt
@@ -162,11 +166,14 @@ one-time nudge (`_claude_profile_fzf_hint`, silenced by
 `CLAUDE_PROFILE_NO_FZF_HINT`) which lives in `claude-profile()` rather than the
 picker because the picker runs inside `$( … )`, where a flag could not persist.
 
-Assets: `zsh tools/generate-readme-svg.zsh` regenerates the two README SVGs
-from a hermetic sandbox (fake `$HOME`, seeded config/snapshots, stub `security`
-so the Keychain is never opened, stub `fzf` that captures the picker's row
-list) and rewrites the README `<img>` refs. The text in both images is real
-output; only the window chrome is drawn.
+Assets: `zsh tools/generate-readme-svg.zsh` regenerates the three README SVGs
+(status / selector / live-session guard) from a hermetic sandbox — fake
+`$HOME`, seeded config + snapshots, stub `security` so the Keychain is never
+opened, stub `fzf` that captures the picker's row list, and a seeded session
+file carrying the generator's own live pid so the guard really refuses. The
+text in all three is real output (status and guard with
+`CLAUDE_PROFILE_COLOR=always`, rendered through the SGR→`<tspan>` core); only
+the window chrome is drawn. Rerun it after any change to those screens.
 
 Tests: `test/run.sh` runs both suites — `test/test_claude_profile.py` (python
 core, stdlib unittest) and `test/{picker,wrapper}.bats` (zsh layer: the selector
