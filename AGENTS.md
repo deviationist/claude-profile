@@ -166,11 +166,14 @@ one-time nudge (`_claude_profile_fzf_hint`, silenced by
 `CLAUDE_PROFILE_NO_FZF_HINT`) which lives in `claude-profile()` rather than the
 picker because the picker runs inside `$( … )`, where a flag could not persist.
 
-Assets: `zsh tools/generate-readme-svg.zsh` regenerates the two README SVGs
-from a hermetic sandbox (fake `$HOME`, seeded config/snapshots, stub `security`
-so the Keychain is never opened, stub `fzf` that captures the picker's row
-list) and rewrites the README `<img>` refs. The text in both images is real
-output; only the window chrome is drawn.
+Assets: `zsh tools/generate-readme-svg.zsh` regenerates the three README SVGs
+(status / selector / live-session guard) from a hermetic sandbox — fake
+`$HOME`, seeded config + snapshots, stub `security` so the Keychain is never
+opened, stub `fzf` that captures the picker's row list, and a seeded session
+file carrying the generator's own live pid so the guard really refuses. The
+text in all three is real output (status and guard with
+`CLAUDE_PROFILE_COLOR=always`, rendered through the SGR→`<tspan>` core); only
+the window chrome is drawn. Rerun it after any change to those screens.
 
 Tests: `test/run.sh` runs both suites — `test/test_claude_profile.py` (python
 core, stdlib unittest) and `test/{picker,wrapper}.bats` (zsh layer: the selector
