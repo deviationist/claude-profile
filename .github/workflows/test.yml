@@ -6,13 +6,41 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both OSes: the python core stubs the Keychain so it is portable, but the
+      # zsh layer is not — it drives a real pty and a real fzf, and the credential
+      # backend it fronts differs by platform (Keychain on macOS, files on Linux).
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - name: Run unit tests
+
+      - name: Install bats + zsh + fzf (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bats zsh fzf
+
+      - name: Install bats + fzf (macOS)
+        # zsh ships with macOS.
+        if: runner.os == 'macOS'
+        run: brew install bats-core fzf
+
+      - name: Tool versions
+        run: |
+          python3 --version
+          zsh --version
+          bats --version
+          fzf --version
+
+      - name: Python core
         # Pure stdlib, no network, no Keychain — the Linux file backend is
         # exercised natively here (IS_MACOS is False on ubuntu).
         run: python3 test/test_claude_profile.py
+
+      - name: Zsh layer
+        run: bats test/picker.bats test/wrapper.bats

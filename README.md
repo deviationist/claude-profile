@@ -67,7 +67,8 @@ that tool is installed): the statusline never blocks, and Claude Code paints it
 once at startup, so a cold cache would show up as a missing segment until your
 first message rather than a late one.
 
-Optional: `fzf` (interactive pickers), [`claude-usage`](https://github.com/deviationist/claude-usage)
+Optional: `fzf` (fuzzy pickers — without it the same pickers fall back to a
+numbered prompt), [`claude-usage`](https://github.com/deviationist/claude-usage)
 (statusline integration — auto-routed per profile; and its `--all` renders a
 themed usage bar for **every** account here via the `usage-json` porcelain,
 which refreshes parked tokens so their usage stays visible).
@@ -188,8 +189,8 @@ transparent passthrough everywhere). `\claude` bypasses it entirely.
 claude-profile                     status: profiles, accounts, token expiry, usage, toggles
                                    (also lists saved-but-unconfigured accounts)
 claude-profile status --usage      …with fresh usage from the API
-claude-profile use [<name>|default]   toggle the active profile (fzf picker w/o name)
-claude-profile account [<name>]    swap the live account (serial; fzf picker w/o name)
+claude-profile use [<name>|default]   toggle the active profile (picker w/o name)
+claude-profile account [<name>]    swap the live account (serial; picker w/o name)
 claude-profile toggle              switch to the NEXT account (flips between two)
                                    (account/toggle take --force = kill live sessions first;
                                     an unauthenticated target prompts to `auth` it inline)
@@ -478,19 +479,33 @@ rotate the moment the rate limit hits, spending no credits.
 
 ## Tests
 
-Pure-stdlib `unittest`, no network and no real Keychain (both stubbed), so it
-runs the same on macOS, Linux, and CI. The Linux file backend is exercised
-directly (`IS_MACOS` forced false).
+Two suites — the python core and the zsh layer — behind one runner:
 
 ```sh
-python3 test/test_claude_profile.py       # or: python3 -m unittest discover -s test
+test/run.sh                                # both (zsh layer skipped if bats is absent)
+python3 test/test_claude_profile.py        # python core only
+bats test/picker.bats test/wrapper.bats    # zsh layer only
 ```
 
-CI runs it on every push/PR (`.github/workflows/test.yml`). Covers the credential
-store (file backend, 0600, round-trips, listing), the refresh gate, exhaustion +
+CI runs both on every push/PR (`.github/workflows/test.yml`), on macOS and Linux.
+Details of the harness are in [`test/README.md`](test/README.md).
+
+**Python core** — pure-stdlib `unittest`, no network and no real Keychain (both
+stubbed), so it runs the same on macOS, Linux, and CI; the Linux file backend is
+exercised directly (`IS_MACOS` forced false). Covers the credential store (file
+backend, 0600, round-trips, listing), the refresh gate, exhaustion +
 `exhaust_credits` rotation, `toggle` selection, the live-session guard/`--force`,
 OAuth-constant resolution, path resolution, and the Linux `security`-absent
 degrade.
+
+**Zsh layer** (`bats`, needs `zsh`; `fzf` optional) — the selector screen in both
+of its branches (fzf headlessly via `--select-1`; the numbered fallback driven
+through a real pty, since it reads `/dev/tty`), and the `claude` wrapper's
+resolution order, passthrough invariant, and selector argv-shaping. `claude`
+itself is a stub on `PATH` that reports the config dir it inherited. Includes the
+**ccfind contract**: ccfind resumes as `CLAUDE_CONFIG_DIR=<dir> claude --resume
+<id>`, so a caller-set dir must be honored verbatim — ccfind tests the emitting
+half in its own suite, this tests the receiving half.
 
 ## License
 
