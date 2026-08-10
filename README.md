@@ -69,8 +69,9 @@ which refreshes parked tokens so their usage stays visible).
 
 ## Configure
 
-`~/.config/claude-profile/config.json` (`$XDG_CONFIG_HOME` respected) — you
-edit this by hand; the CLI reads it:
+`~/.config/claude-profile/config.json` (`$XDG_CONFIG_HOME` respected, or set
+`$CLAUDE_PROFILE_CONFIG` to relocate it) — you edit this by hand; the CLI
+reads it:
 
 ```jsonc
 {

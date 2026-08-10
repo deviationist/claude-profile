@@ -41,7 +41,11 @@ STATE_DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local", "state")),
     "claude-profile",
 )
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+# $CLAUDE_PROFILE_CONFIG relocates the config file. Mostly for tests and odd
+# layouts — but it also lets a consumer (claude-usage watches this file's mtime
+# to know when a seat label went stale) and this tool agree on one path instead
+# of each hardcoding the default.
+CONFIG_PATH = os.environ.get("CLAUDE_PROFILE_CONFIG") or os.path.join(CONFIG_DIR, "config.json")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 # Account snapshots live in accounts_dir() — derived from STATE_DIR on every
 # call rather than frozen here, so a caller that redirects STATE_DIR (tests)
