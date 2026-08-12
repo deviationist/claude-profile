@@ -5,6 +5,12 @@ Claude Code subscription juggler. Two composable modes: **multi-profile**
 **serial accounts** (one dir, several subscriptions; switching swaps only the
 OAuth credential — environment persists bit-for-bit). Full docs: `README.md`.
 
+Three words, used precisely: a **profile** is a config dir and holds the state
+(sessions, memory, settings); an **account** is a subscription and is only a
+credential (whose quota a turn spends); a **seat** is the profile+account pair
+in effect, which is what a label like `Personal (Max 5x)` names. Sessions are
+per-profile, so accounts are invisible to anything reading a config dir.
+
 - Config (user-edited): `~/.config/claude-profile/config.json`
   (`$CLAUDE_PROFILE_CONFIG` relocates it; claude-usage watches this file's
   mtime to expire a cached seat label, so both sides read the same knob) —
