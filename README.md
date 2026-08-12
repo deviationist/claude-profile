@@ -26,6 +26,20 @@ Two composable modes:
 The modes nest: a work machine can run a `work` profile plus a `personal`
 profile whose two Max subscriptions rotate serially inside it.
 
+Three words, used precisely throughout:
+
+| | is | holds |
+|---|---|---|
+| **profile** | a config dir | the state — sessions, memory, settings, per-project trust |
+| **account** | a subscription | the credential, i.e. whose quota a turn spends |
+| **seat** | the profile + account *currently* in effect | what a label like `Personal (Max 5x)` names |
+
+The split is the reason a swap is cheap: accounts change underneath a profile
+that does not move, so nothing you have built up goes anywhere. It is also why
+tools that read this one care about different halves — a session browser wants
+the profile (that is where the transcripts are), a usage meter wants the account
+(that is whose quota is being spent), and a statusline wants the seat.
+
 ## Why
 
 - **Run out of quota, keep working.** Hit the rate limit on one Max plan, flip
@@ -104,7 +118,7 @@ reads it:
   "profiles": {
     "personal": {
       "dir": "~/.claude",           // the Claude Code config dir
-      "display": "Personal",        // OPTIONAL — human-facing name for the seat
+      "display": "Personal",        // OPTIONAL — this profile's half of the seat
                                     // label (see "Seat labels"); default: the key
       "paths": [],                  // cwd prefixes that auto-select this profile
       "accounts": ["max20x", "max5x"],  // credential slots (order = rotation order)
@@ -124,7 +138,7 @@ reads it:
   "keepalive": {                    // OPTIONAL — per-account; omitted account = kept alive (true)
     "max5x": false                  // don't auto-renew this account's refresh token
   },
-  "account_display": {              // OPTIONAL — per-account seat-label names
+  "account_display": {              // OPTIONAL — each account's half of that label
     "max20x": "Max 20x",            // omitted account renders as its own key
     "max5x":  "Max 5x"
   },
@@ -205,7 +219,8 @@ transparent passthrough everywhere). `\claude` bypasses it entirely.
 ### CLI
 
 Leave the name off any of the selection commands and you get a picker over
-exactly the seats you have configured — fuzzy with `fzf`, numbered without it:
+exactly what you have configured — profiles for `use`, accounts for `account` —
+fuzzy with `fzf`, numbered without it:
 
 <div align="center">
   <img src="assets/selector-9cce4d.svg" alt="claude-profile use with no name: an fzf picker over both profiles, the active one marked, with a match counter and a prompt to filter">
