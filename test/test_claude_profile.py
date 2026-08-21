@@ -429,6 +429,171 @@ class RefreshGate(unittest.TestCase):
         self.assertIn("no parked", reason)
 
 
+# ── refresh-deadline ledger (can keep-alive actually gain time?) ────────────
+class HorizonAdvanced(unittest.TestCase):
+    def test_rolling_chain_advances(self):
+        now = int(cp.time.time() * 1000)
+        self.assertTrue(cp.horizon_advanced(now, now + 86400 * 1000))
+
+    def test_capped_chain_does_not(self):
+        ceiling = int(cp.time.time() * 1000) + 86400 * 1000
+        self.assertFalse(cp.horizon_advanced(ceiling, ceiling))
+
+    def test_seconds_of_drift_still_counts_as_capped(self):
+        """A capped chain recomputes the deadline as now + what's left, so two
+        grants land seconds apart — that must not read as progress."""
+        ceiling = int(cp.time.time() * 1000) + 86400 * 1000
+        self.assertFalse(cp.horizon_advanced(ceiling, ceiling + 7000))
+
+    def test_not_comparable(self):
+        self.assertIsNone(cp.horizon_advanced(None, 123))
+        self.assertIsNone(cp.horizon_advanced(123, None))
+
+
+class RecordHorizon(unittest.TestCase):
+    def test_appends_with_gain(self):
+        snap = {}
+        cp.record_horizon(snap, 2_000_000, "grant", prev=1_000_000, live=False)
+        (e,) = snap["horizonHistory"]
+        self.assertEqual(e["kind"], "grant")
+        self.assertEqual(e["exp"], 2_000_000)
+        self.assertEqual(e["gainedSeconds"], 1000)
+        self.assertFalse(e["live"])
+
+    def test_observed_collapses_unchanged_deadline(self):
+        snap = {}
+        self.assertTrue(cp.record_horizon(snap, 5, "observed"))
+        self.assertFalse(cp.record_horizon(snap, 5, "observed"))
+        self.assertTrue(cp.record_horizon(snap, 6, "observed"))
+        self.assertEqual(len(snap["horizonHistory"]), 2)
+
+    def test_grant_never_collapses(self):
+        """Two capped grants are two rows — the repetition IS the evidence."""
+        snap = {}
+        cp.record_horizon(snap, 5, "grant")
+        cp.record_horizon(snap, 5, "grant")
+        self.assertEqual(len(snap["horizonHistory"]), 2)
+
+    def test_ledger_is_bounded(self):
+        snap = {}
+        for i in range(cp.HORIZON_HISTORY_MAX + 25):
+            cp.record_horizon(snap, i, "grant")
+        self.assertEqual(len(snap["horizonHistory"]), cp.HORIZON_HISTORY_MAX)
+        self.assertEqual(snap["horizonHistory"][-1]["exp"], cp.HORIZON_HISTORY_MAX + 24)
+
+
+class RefreshAccountHorizon(unittest.TestCase):
+    """refresh_account must tell a grant that bought time apart from one that
+    returned 200 and bought nothing."""
+
+    def setUp(self):
+        self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["b"]}}}
+        self.saved = {}
+        self.store = {"b": oauth_blob(days_left=5)}
+        self._orig = {n: getattr(cp, n) for n in (
+            "current_account_of", "read_parked_cred", "write_parked_cred",
+            "oauth_refresh_grant", "load_snapshot", "save_snapshot", "mutation_lock")}
+        cp.current_account_of = lambda cfg, prof: None       # nothing live
+        cp.read_parked_cred = lambda n: self.store.get(n)
+        cp.write_parked_cred = lambda n, blob: self.store.__setitem__(n, blob)
+        cp.load_snapshot = lambda n: dict(self.saved)
+        # replace, don't merge — the real save_snapshot rewrites the whole file,
+        # so a key the code popped must actually disappear
+        cp.save_snapshot = lambda n, snap: (self.saved.clear(), self.saved.update(snap))
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    def _server(self, refresh_expires_in):
+        cp.oauth_refresh_grant = lambda rt: {
+            "access_token": "new", "expires_in": 28800,
+            "refresh_token": "r2", "refresh_token_expires_in": refresh_expires_in,
+        }
+
+    def test_rolling_reports_plain_refresh(self):
+        self._server(30 * 86400)
+        msg = cp.refresh_account(self.cfg, "b", 14, False, True)
+        self.assertIn("refreshed", msg)
+        self.assertNotIn(cp.HORIZON_STALLED_MARK, msg)
+        self.assertNotIn("horizonStalledExp", self.saved)
+
+    def test_capped_chain_is_escalated_then_quiet(self):
+        # A ceiling that stays put: each grant is told what little is left of it.
+        left = [5 * 86400]
+        cp.oauth_refresh_grant = lambda rt: {
+            "access_token": "new", "expires_in": 28800,
+            "refresh_token": "r2", "refresh_token_expires_in": left[0],
+        }
+        first = cp.refresh_account(self.cfg, "b", 14, True, True)
+        self.assertIn(cp.HORIZON_STALLED_MARK, first)
+        self.assertIn("auth b", first)
+
+        left[0] -= 5           # same instant, a few seconds of drift later
+        second = cp.refresh_account(self.cfg, "b", 14, True, True)
+        self.assertIn(cp.HORIZON_CAPPED_MARK, second)
+        self.assertNotIn(cp.HORIZON_STALLED_MARK, second)
+
+    def test_recovery_clears_the_stall(self):
+        self._server(5 * 86400)
+        cp.refresh_account(self.cfg, "b", 14, True, True)
+        self.assertIn("horizonStalledSince", self.saved)
+        self._server(30 * 86400)          # e.g. after `auth` opened a new window
+        msg = cp.refresh_account(self.cfg, "b", 14, True, True)
+        self.assertNotIn(cp.HORIZON_STALLED_MARK, msg)
+        self.assertNotIn("horizonStalledSince", self.saved)
+
+    def test_ledger_records_every_grant(self):
+        self._server(30 * 86400)
+        cp.refresh_account(self.cfg, "b", 14, True, True)
+        cp.refresh_account(self.cfg, "b", 14, True, True)
+        self.assertEqual(len(self.saved["horizonHistory"]), 2)
+        self.assertTrue(all(e["kind"] == "grant" for e in self.saved["horizonHistory"]))
+
+
+class ObserveHorizons(unittest.TestCase):
+    """The read-only comparison arm: samples the live account too, and must
+    never make a network call or touch a credential."""
+
+    def setUp(self):
+        self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["a", "b"]}}}
+        self.saved = {}
+        self._orig = {n: getattr(cp, n) for n in (
+            "current_account_of", "read_parked_cred", "read_live_cred",
+            "write_parked_cred", "write_live_cred", "oauth_refresh_grant",
+            "load_snapshot", "save_snapshot")}
+        cp.current_account_of = lambda cfg, prof: "a"        # "a" is live
+        cp.read_live_cred = lambda d: oauth_blob(days_left=30)
+        cp.read_parked_cred = lambda n: oauth_blob(days_left=1)
+        cp.load_snapshot = lambda n: dict(self.saved.get(n, {}))
+        cp.save_snapshot = lambda n, snap: self.saved.__setitem__(n, snap)
+        for n in ("write_parked_cred", "write_live_cred", "oauth_refresh_grant"):
+            setattr(cp, n, self._boom)
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    @staticmethod
+    def _boom(*a, **k):
+        raise AssertionError("observe_horizons must not write or hit the network")
+
+    def test_samples_both_arms_and_labels_them(self):
+        cp.observe_horizons(self.cfg)
+        self.assertTrue(self.saved["a"]["horizonHistory"][-1]["live"])
+        self.assertFalse(self.saved["b"]["horizonHistory"][-1]["live"])
+
+    def test_second_sweep_adds_nothing_when_nothing_moved(self):
+        cp.observe_horizons(self.cfg)
+        cp.observe_horizons(self.cfg)
+        self.assertEqual(len(self.saved["a"]["horizonHistory"]), 1)
+
+    def test_missing_credential_is_skipped_not_fatal(self):
+        cp.read_parked_cred = lambda n: None
+        cp.observe_horizons(self.cfg)
+        self.assertNotIn("b", self.saved)
+
+
 # ── live-session swap guard (+ --force kills) ───────────────────────────────
 class EnsureSwappable(unittest.TestCase):
     def setUp(self):
