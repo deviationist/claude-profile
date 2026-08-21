@@ -99,7 +99,22 @@ python3 stdlib):
   accounts never touched). `refresh_gate()` is the single source of truth
   for "is a grant due?" — shared by the real refresh and the `--jitter`
   pre-check, which sleeps a random `0..SECONDS` (pre-lock) only when a grant
-  is actually due. Keep-alive is **per-account opt-out**: `keepalive
+  is actually due. **A grant is judged on whether the deadline moved, not on
+  HTTP 200**: the server may either roll the refresh token (new deadline =
+  now + lifetime) or cap the whole chain at one absolute instant, and under a
+  cap every grant returns that same date, so keep-alive cannot work at all and
+  only `auth` opens a new window. `horizon_advanced()` classifies it
+  (`HORIZON_SLACK` apart, since a capped chain still drifts by seconds per
+  grant); a stall is escalated as a failure once per stall
+  (`HORIZON_STALLED_MARK`, notify-worthy) and reported quietly on later sweeps
+  (`HORIZON_CAPPED_MARK`), latched by `horizonStalledSince`/`horizonStalledExp`
+  in the snapshot and cleared as soon as a grant gains time again.
+  `record_horizon()` appends to a bounded per-account ledger
+  (`horizonHistory`); `observe_horizons()` samples every account read-only
+  after each sweep — **including the live one**, which no grant may touch, so
+  the ledger carries the rolling-vs-capped comparison — and `horizon [<name>]`
+  prints it. Consecutive `observed` rows with an unchanged deadline collapse,
+  so a gap between rows means nothing moved across those runs. Keep-alive is **per-account opt-out**: `keepalive
   [<account>] [on|off]` (no args = report) writes the config `keepalive` map
   (account → bool, default true, `account_keepalive()`); the daemon sweep
   (`refresh` with no name) skips off accounts, but an explicit `refresh

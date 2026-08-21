@@ -894,6 +894,86 @@ def refresh_health(blob):
     return ""
 
 
+# ── refresh-deadline ledger ─────────────────────────────────────────────────
+# A refresh grant always returns a *new* refresh token, but not necessarily a
+# later deadline, and two server behaviours are indistinguishable from any
+# single grant:
+#
+#   rolling — the new token expires at now + lifetime, so each grant pushes the
+#             deadline out by roughly the time elapsed since the previous one.
+#   capped  — the whole token chain is pinned to one absolute instant, so every
+#             grant returns that same deadline and gains nothing. No amount of
+#             refreshing survives it; only a fresh interactive login (`auth`)
+#             opens a new window.
+#
+# Keep-alive only does its job under the first behaviour, so each grant records
+# what actually happened to the deadline. A capped chain is escalated rather
+# than reported as a success — otherwise the daemon logs "refreshed" every day
+# while the account walks to its expiry.
+
+HORIZON_SLACK = 60           # s — separates "gained the elapsed time" from "gained nothing"
+HORIZON_HISTORY_MAX = 60     # bounded ledger: ~2 months of daily entries
+HORIZON_STALLED_MARK = "refresh deadline DID NOT MOVE"   # first detection → notify
+HORIZON_CAPPED_MARK = "still capped at"                  # later sweeps → log only
+
+
+def horizon_advanced(prev, new):
+    """Did this grant push the refresh-token deadline out? prev/new are ms-epoch
+    or None. True / False / None (None = not comparable)."""
+    if not prev or not new:
+        return None
+    return (new - prev) / 1000 > HORIZON_SLACK
+
+
+def record_horizon(snap, exp, kind, prev=None, live=None):
+    """Append one refresh-deadline observation to `snap`'s bounded ledger
+    (mutates snap; the caller saves it). `kind` is 'grant' (a refresh grant
+    returned this deadline) or 'observed' (read off the stored credential, no
+    network). Consecutive 'observed' entries carrying an unchanged deadline are
+    collapsed, so the ledger reads as "the deadline moved at these instants" —
+    the sweep runs daily, so a gap between entries is itself evidence that
+    nothing moved. Returns True if an entry was appended."""
+    hist = snap.get("horizonHistory") or []
+    if kind == "observed" and hist and hist[-1].get("exp") == exp:
+        return False
+    entry = {
+        "at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "kind": kind,
+        "exp": exp,
+    }
+    if live is not None:
+        entry["live"] = live
+    if prev:
+        entry["prev"] = prev
+        entry["gainedSeconds"] = round((exp - prev) / 1000) if exp else None
+    snap["horizonHistory"] = (hist + [entry])[-HORIZON_HISTORY_MAX:]
+    return True
+
+
+def observe_horizons(cfg):
+    """Record every configured account's current refresh deadline — no network,
+    no mutation of any credential. Parked accounts are read from their parked
+    pair, the account in use from the live Keychain item.
+
+    This is the ledger's comparison arm: it shows whether a chain that Claude
+    Code itself keeps refreshing (the live account) rolls its deadline forward
+    while a parked one that only this daemon touches does not. Best-effort — a
+    Keychain miss just skips that account and never breaks the sweep."""
+    for name in sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}):
+        try:
+            profile = next((p for p in cfg["profiles"] if name in profile_accounts(cfg, p)), None)
+            live = profile is not None and current_account_of(cfg, profile) == name
+            blob = read_live_cred(profile_dir(cfg, profile)) if live else read_parked_cred(name)
+            exp = refresh_expiry_ms(blob) if blob else None
+            if not exp:
+                continue
+            snap = load_snapshot(name) or {}
+            if record_horizon(snap, exp, "observed", live=live):
+                save_snapshot(name, snap)
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+
 def account_usage(cfg, state, profile, account, ttl=USAGE_TTL):
     """Cached usage summary for an account (live or parked). Returns
     (limits|None, age_seconds|None). None = unknown (no valid token / offline);
@@ -1147,6 +1227,7 @@ def refresh_account(cfg, name, min_days_left, force, quiet):
     if not act:
         return reason
     rt = oauth.get("refreshToken")
+    prev_rexp = oauth.get("refreshTokenExpiresAt")
 
     try:
         resp = oauth_refresh_grant(rt)
@@ -1174,14 +1255,45 @@ def refresh_account(cfg, name, min_days_left, force, quiet):
         return f"{name}: KEYCHAIN VERIFY FAILED after refresh — run `claude-profile auth {name}`"
     snap = load_snapshot(name) or {}
     snap["lastRefreshedAt"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    save_snapshot(name, snap)
     nexp = new_oauth.get("refreshTokenExpiresAt")
+    record_horizon(snap, nexp, "grant", prev=prev_rexp, live=False)
+
+    # A grant that succeeds without moving the deadline means the server is
+    # capping this token chain — every further grant is wasted and the account
+    # dies on that date regardless. Report the first detection loudly (it is
+    # notify-worthy); later sweeps say the same thing quietly, so a stall that
+    # lasts a fortnight doesn't email once a day.
+    advanced = horizon_advanced(prev_rexp, nexp)
+    if advanced is False:
+        # Same slack as horizon_advanced: a capped chain still recomputes the
+        # deadline as now + whatever is left of it, so successive grants land a
+        # few seconds apart rather than on an identical millisecond.
+        was = snap.get("horizonStalledExp")
+        already = bool(was) and abs(was - nexp) / 1000 <= HORIZON_SLACK
+        snap["horizonStalledExp"] = nexp
+        snap.setdefault("horizonStalledSince", snap["lastRefreshedAt"])
+    else:
+        already = False
+        snap.pop("horizonStalledExp", None)
+        snap.pop("horizonStalledSince", None)
+    save_snapshot(name, snap)
+
     if nexp:
         dt = datetime.datetime.fromtimestamp(nexp / 1000).astimezone()
         days = (nexp / 1000 - time.time()) / 86400
-        horizon = f", refresh token good until {dt.strftime('%Y-%m-%d')} ({days:.0f}d)"
+        when = f"{dt.strftime('%Y-%m-%d')} ({days:.0f}d)"
+        horizon = f", refresh token good until {when}"
     else:
-        horizon = ""
+        when, horizon = "", ""
+    if advanced is False:
+        fix = f"only `claude-profile auth {name}` opens a new window"
+        if already:
+            return f"{name}: {HORIZON_CAPPED_MARK} {when} — {fix}"
+        # Say what was measured, not what caused it: a grant that returns no
+        # expiry at all leaves the deadline where it was too, and "bought no
+        # time" is true either way.
+        return (f"{name}: refreshed but the {HORIZON_STALLED_MARK} — {when}; "
+                f"this grant bought no time, {fix}")
     return f"{name}: refreshed{horizon}"
 
 
@@ -1203,7 +1315,7 @@ def notify_failure(cfg, fails):
         return
     host = socket.gethostname()
     body = (
-        f"claude-profile keep-alive refresh failed on {host}:\n\n"
+        f"claude-profile keep-alive could not keep an account alive on {host}:\n\n"
         + "\n".join(f"  - {r}" for r in fails)
         + "\n\nFix: run `claude-profile status`, then `claude-profile auth <name>`.\n"
     )
@@ -1245,15 +1357,74 @@ def cmd_refresh(args):
     with mutation_lock():
         for name in names:
             results.append(refresh_account(cfg, name, args.min_days_left, args.force, args.quiet))
+
+    # Sample every account's deadline afterwards, including the live one no
+    # grant may touch. Read-only and outside the lock: it makes no network call
+    # and mutates no credential, and the live Keychain read must not be able to
+    # block a concurrent swap.
+    observe_horizons(cfg)
+
     stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     for r in results:
         boring = ": fresh (" in r or ": skipped — live in" in r or ": skipped — keep-alive" in r
         if not (args.quiet and boring):
             print(f"[{stamp}] {r}")
-    fails = [r for r in results if "FAILED" in r or "EXPIRED" in r]
+    # A capped chain is a keep-alive failure even though the grant returned 200:
+    # only the first detection notifies (HORIZON_CAPPED_MARK on later sweeps).
+    fails = [r for r in results
+             if "FAILED" in r or "EXPIRED" in r or HORIZON_STALLED_MARK in r]
     if fails:
         notify_failure(cfg, fails)
         sys.exit(1)
+
+
+def _fmt_ms(ms):
+    """ms-epoch → local 'YYYY-MM-DD HH:MM', or '?'."""
+    if not ms:
+        return "?"
+    return datetime.datetime.fromtimestamp(ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def cmd_horizon(args):
+    """Print the recorded refresh-deadline ledger per account: when each
+    account's refresh-token deadline moved, by how much, and whether the chain
+    has been capped. This is the evidence for the question keep-alive rests on
+    — whether refreshing a parked account can keep it alive at all, or whether
+    only a fresh `auth` can. Entries are appended by `refresh` (both its grants
+    and its read-only sweep); an unchanged deadline is not re-recorded, so a gap
+    between rows means the deadline sat still across those daily runs."""
+    cfg = load_config()
+    names = [args.name] if args.name else sorted(
+        {a for pr in cfg["profiles"].values() for a in (pr.get("accounts") or [])}
+    )
+    for name in names:
+        snap = load_snapshot(name) or {}
+        hist = snap.get("horizonHistory") or []
+        head = c(name, "bold")
+        if snap.get("horizonStalledSince"):
+            head += "  " + c(
+                f"capped at {_fmt_ms(snap.get('horizonStalledExp'))} "
+                f"since {str(snap['horizonStalledSince'])[:10]} "
+                f"→ claude-profile auth {name}", "red")
+        print(head)
+        if not hist:
+            print(c("  no observations yet — the ledger fills as `refresh` runs", "dim"))
+            continue
+        prev = None
+        for e in hist:
+            exp = e.get("exp")
+            gain = e.get("gainedSeconds")
+            if gain is None and prev and exp:
+                gain = round((exp - prev) / 1000)
+            if gain is None:
+                delta = ""
+            elif abs(gain) <= HORIZON_SLACK:
+                delta = "  " + c("+0 — did not move", "red")
+            else:
+                delta = "  " + c(f"{gain / 86400:+.2f}d", "green" if gain > 0 else "red")
+            arm = "live" if e.get("live") else "parked"
+            print(f"  {e.get('at', '?')}  {e.get('kind', '?'):8} {arm:6} → {_fmt_ms(exp)}{delta}")
+            prev = exp
 
 
 # ── keep-alive daemon (launchd) ─────────────────────────────────────────────
@@ -2340,6 +2511,13 @@ def main():
     p.add_argument("--all", action="store_true", help="every account across all profiles")
     p.add_argument("--fresh", action="store_true", help="accepted for symmetry (raw fetch is always live)")
     p.set_defaults(func=cmd_usage_json)
+
+    p = sub.add_parser(
+        "horizon",
+        help="show the recorded refresh-token deadline ledger (did keep-alive actually gain time?)",
+    )
+    p.add_argument("name", nargs="?", help="account to report (default: all configured)")
+    p.set_defaults(func=cmd_horizon)
 
     p = sub.add_parser(
         "anchor-window",
