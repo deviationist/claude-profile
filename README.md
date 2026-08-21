@@ -54,8 +54,10 @@ the profile (that is where the transcripts are), a usage meter wants the account
   credits left on the table.
 - **Work and personal, cleanly split.** Separate config dirs auto-selected by
   directory — and serial accounts nest *inside* each, so both axes compose.
-- **Doesn't age out on you.** A launchd/systemd keep-alive daemon renews parked
-  refresh tokens before they expire (per-account opt-out, email-on-failure).
+- **Ages out loudly, not silently.** A launchd/systemd keep-alive daemon renews
+  parked refresh tokens for as long as the server will extend them, and says so
+  — log, `status`, and email — the moment it can't, so a re-login is a chore you
+  schedule rather than a surprise mid-task (per-account opt-out).
 - **Invisible until you need it.** No config, or the default `~/.claude`? The
   wrapper is a byte-identical passthrough. `\claude` bypasses it entirely.
 - **Nothing to break, nothing to lose.** Secrets never hit argv; worst case
@@ -254,6 +256,8 @@ claude-profile anchor-window [--all|--profile P|--account A]   anchor a 5-hour
                                    (serial-safe; no session/swap — see below)
 claude-profile keepalive [<account>] [on|off]  per-account keep-alive toggle (no args = report)
 claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
+claude-profile horizon [<name>]    refresh-deadline ledger: is keep-alive
+                                   actually gaining time, or is the chain capped?
 claude-profile daemon install [--jitter N]|uninstall|status   keep-alive daemon (launchd/systemd)
 claude-with <profile> [args]       one-shot launch against a profile
 claude-switch [<name>]             alias for `claude-profile use`
@@ -303,10 +307,22 @@ after), or let auto mode handle it.
 
 ### Re-authenticating a parked account
 
-Access tokens are short-lived and refresh silently; the clock that matters
-is the **refresh token** (~weeks). Every swap off an account re-parks its
-freshest pair, so regular rotation keeps parked accounts alive by itself —
-only an account left untouched for weeks can age out.
+Access tokens are short-lived and refresh silently; the clock that matters is
+the **refresh token**. A refresh grant always returns a *new* refresh token —
+but not necessarily a later deadline, and that distinction is the whole story:
+
+- **rolling** — the new token expires at `now + lifetime`, so every grant buys
+  back the time since the last one. Keep-alive does what it says.
+- **capped** — the server pins the entire token chain to one absolute instant.
+  Every grant returns that same deadline and gains nothing, so the account
+  lapses on that date however often it is refreshed. Only a fresh interactive
+  login (`claude-profile auth <name>`) opens a new window.
+
+Which behaviour you get is the server's call, not this tool's, and it has been
+observed to differ between accounts on the same machine. **So plan on a periodic
+re-login** — on the order of a month per account — rather than expecting
+keep-alive to abolish it. What keep-alive buys is that the deadline is renewed
+whenever it can be, and never arrives unannounced when it can't.
 
 Two lines of defence when one does age:
 
@@ -319,6 +335,28 @@ themselves), the new pair is written **and read back** from the Keychain
 before success is declared, and a mutation lock serializes it against
 manual swaps. `claude-profile daemon install` registers a launchd agent
 running it daily (`daemon status` / `daemon uninstall` to inspect/remove).
+
+Because a capped grant still returns HTTP 200, every grant is judged on whether
+the deadline actually *moved*, not on whether it succeeded — otherwise the log
+reads `refreshed` each day while the account walks to its expiry. A grant that
+gains nothing is reported as a failure (and emailed, once per stall rather than
+once per day); later sweeps say `still capped at <date>` quietly. Each run also
+samples every account's deadline read-only — including the live one, which no
+grant may touch — so `claude-profile horizon` can show whether a chain is
+rolling forward or standing still:
+
+```
+claude-profile horizon
+max20x
+  2026-08-20T13:17:02+02:00  observed live   → 2026-09-19 13:17  +30.00d
+max5x     capped at 2026-08-21 23:07 since 2026-08-08 → claude-profile auth max5x
+  2026-08-08T12:22:51+02:00  grant    parked → 2026-08-21 23:07
+  2026-08-09T12:18:54+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
+  2026-08-20T17:44:05+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
+```
+
+An unchanged deadline is not re-recorded, so a gap between rows means the
+deadline sat still across those daily runs.
 
 Keep-alive is **per-account and opt-out**: every account is renewed by
 default, but `claude-profile keepalive <account> off` excludes one from the
@@ -338,8 +376,9 @@ the lock so a concurrent swap isn't blocked). `daemon install [--jitter N]`
 bakes this in (default `3600` = grants land anywhere in a 1h window;
 `--jitter 0` to disable).
 
-If a refresh ever fails (a token aged out entirely, or the endpoint rejects
-it), set `notify_email` in the config (or `$CLAUDE_PROFILE_NOTIFY_EMAIL`) and
+If keep-alive ever cannot keep an account alive — a token aged out entirely,
+the endpoint rejected it, or the chain turned out to be capped — set
+`notify_email` in the config (or `$CLAUDE_PROFILE_NOTIFY_EMAIL`) and
 it will email you via the system `sendmail` — handy for the unattended daemon.
 
 **2. Warnings + painless re-auth.** If a token still ages out (machine off
