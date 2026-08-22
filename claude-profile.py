@@ -55,7 +55,6 @@ DEFAULT_CLAUDE_DIR = os.path.join(HOME, ".claude")
 LIVE_SERVICE_DEFAULT = "Claude Code-credentials"
 PARKED_SERVICE_PREFIX = "claude-profile-parked-"
 USAGE_TTL = 60  # seconds; server-side usage cache freshness
-LAUNCHD_LABEL = "com.claude-profile.refresh"
 
 # Anthropic's OAuth client id + endpoints and Claude Code's User-Agent identify
 # Claude Code's own OAuth client, not this tool — so they are deliberately NOT
@@ -326,7 +325,7 @@ def profile_display(cfg, name):
 
 def account_display(cfg, account):
     """Human-facing name for an account: the top-level `account_display` map
-    (account → string, mirroring the `keepalive` map), else the raw name."""
+    (account → string), else the raw name."""
     if not account:
         return None
     return (cfg.get("account_display") or {}).get(account) or account
@@ -373,13 +372,6 @@ def profile_of_dir(cfg, d):
         if current and current in profile_accounts(cfg, n):
             return n
     return matches[0]
-
-
-def account_keepalive(cfg, account):
-    """Whether the keep-alive daemon should renew this account's refresh token.
-    Default True; flip with `claude-profile keepalive <account> off`. Stored in
-    the top-level `keepalive` map of config.json (account → bool)."""
-    return bool((cfg.get("keepalive") or {}).get(account, True))
 
 
 def profile_exhaust_credits(cfg, profile):
@@ -894,86 +886,6 @@ def refresh_health(blob):
     return ""
 
 
-# ── refresh-deadline ledger ─────────────────────────────────────────────────
-# A refresh grant always returns a *new* refresh token, but not necessarily a
-# later deadline, and two server behaviours are indistinguishable from any
-# single grant:
-#
-#   rolling — the new token expires at now + lifetime, so each grant pushes the
-#             deadline out by roughly the time elapsed since the previous one.
-#   capped  — the whole token chain is pinned to one absolute instant, so every
-#             grant returns that same deadline and gains nothing. No amount of
-#             refreshing survives it; only a fresh interactive login (`auth`)
-#             opens a new window.
-#
-# Keep-alive only does its job under the first behaviour, so each grant records
-# what actually happened to the deadline. A capped chain is escalated rather
-# than reported as a success — otherwise the daemon logs "refreshed" every day
-# while the account walks to its expiry.
-
-HORIZON_SLACK = 60           # s — separates "gained the elapsed time" from "gained nothing"
-HORIZON_HISTORY_MAX = 60     # bounded ledger: ~2 months of daily entries
-HORIZON_STALLED_MARK = "refresh deadline DID NOT MOVE"   # first detection → notify
-HORIZON_CAPPED_MARK = "still capped at"                  # later sweeps → log only
-
-
-def horizon_advanced(prev, new):
-    """Did this grant push the refresh-token deadline out? prev/new are ms-epoch
-    or None. True / False / None (None = not comparable)."""
-    if not prev or not new:
-        return None
-    return (new - prev) / 1000 > HORIZON_SLACK
-
-
-def record_horizon(snap, exp, kind, prev=None, live=None):
-    """Append one refresh-deadline observation to `snap`'s bounded ledger
-    (mutates snap; the caller saves it). `kind` is 'grant' (a refresh grant
-    returned this deadline) or 'observed' (read off the stored credential, no
-    network). Consecutive 'observed' entries carrying an unchanged deadline are
-    collapsed, so the ledger reads as "the deadline moved at these instants" —
-    the sweep runs daily, so a gap between entries is itself evidence that
-    nothing moved. Returns True if an entry was appended."""
-    hist = snap.get("horizonHistory") or []
-    if kind == "observed" and hist and hist[-1].get("exp") == exp:
-        return False
-    entry = {
-        "at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "kind": kind,
-        "exp": exp,
-    }
-    if live is not None:
-        entry["live"] = live
-    if prev:
-        entry["prev"] = prev
-        entry["gainedSeconds"] = round((exp - prev) / 1000) if exp else None
-    snap["horizonHistory"] = (hist + [entry])[-HORIZON_HISTORY_MAX:]
-    return True
-
-
-def observe_horizons(cfg):
-    """Record every configured account's current refresh deadline — no network,
-    no mutation of any credential. Parked accounts are read from their parked
-    pair, the account in use from the live Keychain item.
-
-    This is the ledger's comparison arm: it shows whether a chain that Claude
-    Code itself keeps refreshing (the live account) rolls its deadline forward
-    while a parked one that only this daemon touches does not. Best-effort — a
-    Keychain miss just skips that account and never breaks the sweep."""
-    for name in sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}):
-        try:
-            profile = next((p for p in cfg["profiles"] if name in profile_accounts(cfg, p)), None)
-            live = profile is not None and current_account_of(cfg, profile) == name
-            blob = read_live_cred(profile_dir(cfg, profile)) if live else read_parked_cred(name)
-            exp = refresh_expiry_ms(blob) if blob else None
-            if not exp:
-                continue
-            snap = load_snapshot(name) or {}
-            if record_horizon(snap, exp, "observed", live=live):
-                save_snapshot(name, snap)
-        except (OSError, RuntimeError, ValueError):
-            continue
-
-
 def account_usage(cfg, state, profile, account, ttl=USAGE_TTL):
     """Cached usage summary for an account (live or parked). Returns
     (limits|None, age_seconds|None). None = unknown (no valid token / offline);
@@ -1014,13 +926,59 @@ def _raw_usage_cache_path(name):
     return os.path.join(STATE_DIR, "usage-raw", f"{name}.json")
 
 
+def refresh_parked_access(name):
+    """Mint a fresh *access* token for a parked account and re-park the pair.
+
+    Not a keep-alive: nothing here extends the refresh token's deadline, which
+    the server pins at interactive login and no grant can move. This exists
+    only so features that need a parked account's token on demand —
+    `usage-json` rendering a parked seat, `anchor-window` anchoring one — are
+    not blocked by the 8-hour access-token life. Call it under the mutation
+    lock. Returns True if a usable pair was re-parked.
+
+    Declines a doomed grant (no parked pair, no refresh token, or a refresh
+    token already past its deadline) rather than spending a request on it, and
+    never touches a live credential — Claude Code owns that one."""
+    blob = read_parked_cred(name)
+    if blob is None:
+        return False
+    try:
+        oauth = json.loads(blob).get("claudeAiOauth") or {}
+    except json.JSONDecodeError:
+        return False
+    rt = oauth.get("refreshToken")
+    rexp = oauth.get("refreshTokenExpiresAt")
+    if not rt or (rexp and rexp / 1000 <= time.time()):
+        return False
+    try:
+        resp = oauth_refresh_grant(rt)
+    except RuntimeError:
+        return False
+
+    now_ms = int(time.time() * 1000)
+    new_oauth = dict(oauth)
+    new_oauth["accessToken"] = resp["access_token"]
+    if resp.get("expires_in"):
+        new_oauth["expiresAt"] = now_ms + int(resp["expires_in"]) * 1000
+    if resp.get("refresh_token"):
+        new_oauth["refreshToken"] = resp["refresh_token"]
+        if resp.get("refresh_token_expires_in"):
+            new_oauth["refreshTokenExpiresAt"] = (
+                now_ms + int(resp["refresh_token_expires_in"]) * 1000
+            )
+    new_blob = json.dumps({**json.loads(blob), "claudeAiOauth": new_oauth})
+    # write + read-back verify — a new refresh token must never exist only in
+    # memory, or the parked pair is silently orphaned
+    write_parked_cred(name, new_blob)
+    return read_parked_cred(name) == new_blob
+
+
 def account_access_token(cfg, name, refresh_if_expired=True):
     """A usable *access* token for one account (live or parked), plus whether it
     is the live account. The live account reads the live credential (Claude
     Code's to refresh — never touched here); a parked account reads its parked
     pair, and an expired parked access token is refreshed in place first under
-    the mutation lock (the same grant the daemon uses; the gate inside
-    refresh_account still declines a doomed grant). Returns (token|None,
+    the mutation lock. Returns (token|None,
     is_live:bool) — None means unavailable (offline, a dead refresh token, or a
     live account whose token lapsed between Claude Code sessions)."""
     profile = next(
@@ -1032,11 +990,11 @@ def account_access_token(cfg, name, refresh_if_expired=True):
         blob = read_parked_cred(name)
     token = token_from_blob(blob) if blob else None
     if token is None and not live and refresh_if_expired:
-        # Parked + expired access token → refresh in place, then re-read. The
-        # gate inside refresh_account still declines a doomed grant (expired
-        # refresh token) and never touches a live account.
+        # Parked + expired access token → refresh in place, then re-read.
+        # refresh_parked_access declines a doomed grant and never touches a
+        # live account.
         with mutation_lock():
-            refresh_account(cfg, name, min_days_left=0, force=True, quiet=True)
+            refresh_parked_access(name)
         blob = read_parked_cred(name)
         token = token_from_blob(blob) if blob else None
     return token, live
@@ -1047,10 +1005,10 @@ def account_usage_raw(cfg, name, refresh_if_expired=True, ttl=USAGE_TTL):
     server response, not the summarized `limits` cache. Powers the `usage-json`
     porcelain that `claude-usage --all` renders with its own bars/themes.
 
-    For a parked account whose *access* token has expired (they lapse in hours,
-    while the keep-alive daemon only tracks the multi-day *refresh* token), this
-    refreshes the token pair in place first — under the mutation lock, via the
-    same grant the daemon uses — so parked accounts stay renderable rather than
+    For a parked account whose *access* token has expired (they lapse in eight
+    hours, and nothing renews a parked one in the background), this refreshes
+    the pair in place first — under the mutation lock, via
+    `refresh_parked_access` — so parked accounts stay renderable rather than
     blanking out. Never touches a live account's credential (that's Claude
     Code's to refresh).
 
@@ -1090,7 +1048,7 @@ import fcntl
 
 @contextlib.contextmanager
 def mutation_lock():
-    """Serialize credential mutations (manual swaps vs the refresh daemon)."""
+    """Serialize credential mutations (manual swaps vs an on-demand refresh)."""
     os.makedirs(STATE_DIR, exist_ok=True)
     fd = os.open(os.path.join(STATE_DIR, ".lock"), os.O_CREAT | os.O_RDWR)
     try:
@@ -1165,7 +1123,7 @@ def activate_account(cfg, state, profile, target):
     save_state(state)
 
 
-# ── keep-alive refresh (parked accounts) ────────────────────────────────────
+# ── OAuth refresh grant (parked accounts, on demand) ────────────────────────
 
 def oauth_refresh_grant(refresh_token):
     """Perform the OAuth refresh grant Claude Code itself uses. Returns the
@@ -1190,429 +1148,6 @@ def oauth_refresh_grant(refresh_token):
     if status == 200:
         raise RuntimeError(f"no access_token in response ({list(data or {})[:5]})")
     raise RuntimeError(f"HTTP {status} {err}".strip())
-
-
-def refresh_gate(cfg, name, min_days_left, force):
-    """Decide whether a parked account needs a network refresh grant. Pure /
-    read-only (Keychain read only, no network). Returns
-    (act: bool, blob: str|None, oauth: dict|None, reason: str|None):
-    act=True → a grant should run (reason is None); act=False → reason is the
-    human 'skipped/fresh/EXPIRED' line. Single source of truth for both the
-    real refresh and the jitter 'is anything due?' pre-check."""
-    live_in = [p for p in cfg["profiles"] if current_account_of(cfg, p) == name]
-    if live_in and not force:
-        return False, None, None, f"{name}: skipped — live in profile \"{live_in[0]}\" (live tokens refresh themselves)"
-    blob = read_parked_cred(name)
-    if blob is None:
-        return False, None, None, f"{name}: skipped — no parked credential"
-    try:
-        oauth = json.loads(blob).get("claudeAiOauth") or {}
-    except json.JSONDecodeError:
-        return False, None, None, f"{name}: skipped — unparsable parked blob"
-    if not oauth.get("refreshToken"):
-        return False, blob, oauth, f"{name}: skipped — parked blob has no refresh token"
-    rexp = oauth.get("refreshTokenExpiresAt")
-    if rexp and rexp / 1000 <= time.time():
-        return False, blob, oauth, f"{name}: refresh token already EXPIRED — run `claude-profile auth {name}`"
-    # Known-capped chain: a grant here provably buys nothing (that is what the
-    # latch records), so stop making one every day for the ~2 weeks between the
-    # gate opening and the lapse. Latched against the *deadline*, not a flag, so
-    # it self-heals: `auth` mints a chain with a new deadline, this stops
-    # matching, and grants resume on their own. --force still goes through, so
-    # the swap-in path can always try to make a stale access token usable.
-    if not force and rexp:
-        capped = (load_snapshot(name) or {}).get("horizonStalledExp")
-        if capped and abs(capped - rexp) / 1000 <= HORIZON_SLACK:
-            day = datetime.datetime.fromtimestamp(rexp / 1000).astimezone().strftime("%Y-%m-%d")
-            return False, blob, oauth, (
-                f"{name}: capped at {day} — grants gain nothing here; "
-                f"run `claude-profile auth {name}`")
-    if not force and rexp and (rexp / 1000 - time.time()) > min_days_left * 86400:
-        days = (rexp / 1000 - time.time()) / 86400
-        return False, blob, oauth, f"{name}: fresh ({days:.0f}d left) — nothing to do"
-    return True, blob, oauth, None
-
-
-def refresh_account(cfg, name, min_days_left, force, quiet):
-    """Refresh a parked account's token pair in place. Returns a short result
-    string (also printed unless quiet suppresses the boring ones)."""
-    act, blob, oauth, reason = refresh_gate(cfg, name, min_days_left, force)
-    if not act:
-        return reason
-    rt = oauth.get("refreshToken")
-    prev_rexp = oauth.get("refreshTokenExpiresAt")
-
-    try:
-        resp = oauth_refresh_grant(rt)
-    except RuntimeError as e:
-        return f"{name}: refresh grant FAILED ({e}) — parked credential unchanged"
-
-    now_ms = int(time.time() * 1000)
-    new_oauth = dict(oauth)
-    new_oauth["accessToken"] = resp["access_token"]
-    if resp.get("expires_in"):
-        new_oauth["expiresAt"] = now_ms + int(resp["expires_in"]) * 1000
-    if resp.get("refresh_token"):
-        new_oauth["refreshToken"] = resp["refresh_token"]
-        if resp.get("refresh_token_expires_in"):
-            new_oauth["refreshTokenExpiresAt"] = (
-                now_ms + int(resp["refresh_token_expires_in"]) * 1000
-            )
-        # no expiry in response → keep the old (conservative: warns early)
-    new_blob = json.dumps({**json.loads(blob), "claudeAiOauth": new_oauth})
-
-    # write + read-back verify before declaring success — the new refresh
-    # token must never exist only in memory
-    write_parked_cred(name, new_blob)
-    if read_parked_cred(name) != new_blob:
-        return f"{name}: KEYCHAIN VERIFY FAILED after refresh — run `claude-profile auth {name}`"
-    snap = load_snapshot(name) or {}
-    snap["lastRefreshedAt"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    nexp = new_oauth.get("refreshTokenExpiresAt")
-    record_horizon(snap, nexp, "grant", prev=prev_rexp, live=False)
-
-    # A grant that succeeds without moving the deadline means the server is
-    # capping this token chain — every further grant is wasted and the account
-    # dies on that date regardless. Report the first detection loudly (it is
-    # notify-worthy); later sweeps say the same thing quietly, so a stall that
-    # lasts a fortnight doesn't email once a day.
-    advanced = horizon_advanced(prev_rexp, nexp)
-    if advanced is False:
-        # Same slack as horizon_advanced: a capped chain still recomputes the
-        # deadline as now + whatever is left of it, so successive grants land a
-        # few seconds apart rather than on an identical millisecond.
-        was = snap.get("horizonStalledExp")
-        already = bool(was) and abs(was - nexp) / 1000 <= HORIZON_SLACK
-        snap["horizonStalledExp"] = nexp
-        snap.setdefault("horizonStalledSince", snap["lastRefreshedAt"])
-    else:
-        already = False
-        snap.pop("horizonStalledExp", None)
-        snap.pop("horizonStalledSince", None)
-    save_snapshot(name, snap)
-
-    if nexp:
-        dt = datetime.datetime.fromtimestamp(nexp / 1000).astimezone()
-        days = (nexp / 1000 - time.time()) / 86400
-        when = f"{dt.strftime('%Y-%m-%d')} ({days:.0f}d)"
-        horizon = f", refresh token good until {when}"
-    else:
-        when, horizon = "", ""
-    if advanced is False:
-        fix = f"only `claude-profile auth {name}` opens a new window"
-        if already:
-            return f"{name}: {HORIZON_CAPPED_MARK} {when} — {fix}"
-        # Say what was measured, not what caused it: a grant that returns no
-        # expiry at all leaves the deadline where it was too, and "bought no
-        # time" is true either way.
-        return (f"{name}: refreshed but the {HORIZON_STALLED_MARK} — {when}; "
-                f"this grant bought no time, {fix}")
-    return f"{name}: refreshed{horizon}"
-
-
-def notify_failure(cfg, fails):
-    """Best-effort email on keep-alive failure via the system mailer. Opt-in:
-    fires only when `notify_email` is set (config, or $CLAUDE_PROFILE_NOTIFY_EMAIL)
-    and a `sendmail` exists (e.g. the homelab's msmtp-mta). Never raises."""
-    to = os.environ.get("CLAUDE_PROFILE_NOTIFY_EMAIL") or (cfg or {}).get("notify_email")
-    if not to or not fails:
-        return
-    import shutil
-    import socket
-
-    sendmail = shutil.which("sendmail") or (
-        "/usr/sbin/sendmail" if os.path.exists("/usr/sbin/sendmail") else None
-    )
-    if not sendmail:
-        print("notify_email is set but no `sendmail` was found — skipping email", file=sys.stderr)
-        return
-    host = socket.gethostname()
-    body = (
-        f"claude-profile keep-alive could not keep an account alive on {host}:\n\n"
-        + "\n".join(f"  - {r}" for r in fails)
-        + "\n\nFix: run `claude-profile status`, then `claude-profile auth <name>`.\n"
-    )
-    msg = f"To: {to}\nSubject: [claude-profile] keep-alive failed on {host}\n\n{body}"
-    try:
-        subprocess.run(
-            [sendmail, "-t"], input=msg, text=True, timeout=30,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-
-def cmd_refresh(args):
-    cfg = load_config()
-    pre = []
-    if args.name:
-        # explicit account → honored regardless of its keep-alive setting
-        names = [args.name]
-    else:
-        # all-accounts / daemon run → skip accounts with keep-alive turned off
-        alln = sorted({a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])})
-        names = [n for n in alln if account_keepalive(cfg, n)]
-        pre = [f"{n}: skipped — keep-alive disabled" for n in alln if not account_keepalive(cfg, n)]
-
-    # Timing jitter: if (and only if) a grant is actually due, sleep a random
-    # 0..jitter seconds first, so the daemon's request never lands at a fixed
-    # wall-clock time. No-op runs (nothing due) skip the sleep, staying instant.
-    # Slept BEFORE the mutation lock so a concurrent manual swap isn't blocked;
-    # refresh_account re-runs the gate under the lock, so this is TOCTOU-safe.
-    jitter = getattr(args, "jitter", 0) or 0
-    if jitter > 0 and any(refresh_gate(cfg, n, args.min_days_left, args.force)[0] for n in names):
-        delay = random.uniform(0, jitter)
-        stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-        print(f"[{stamp}] jitter: sleeping {delay:.0f}s before grant", file=sys.stderr)
-        time.sleep(delay)
-
-    results = list(pre)
-    with mutation_lock():
-        for name in names:
-            results.append(refresh_account(cfg, name, args.min_days_left, args.force, args.quiet))
-
-    # Sample every account's deadline afterwards, including the live one no
-    # grant may touch. Read-only and outside the lock: it makes no network call
-    # and mutates no credential, and the live Keychain read must not be able to
-    # block a concurrent swap.
-    observe_horizons(cfg)
-
-    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    for r in results:
-        boring = ": fresh (" in r or ": skipped — live in" in r or ": skipped — keep-alive" in r
-        if not (args.quiet and boring):
-            print(f"[{stamp}] {r}")
-    # A capped chain is a keep-alive failure even though the grant returned 200:
-    # only the first detection notifies (HORIZON_CAPPED_MARK on later sweeps).
-    fails = [r for r in results
-             if "FAILED" in r or "EXPIRED" in r or HORIZON_STALLED_MARK in r]
-    if fails:
-        notify_failure(cfg, fails)
-        sys.exit(1)
-
-
-def _fmt_ms(ms):
-    """ms-epoch → local 'YYYY-MM-DD HH:MM', or '?'."""
-    if not ms:
-        return "?"
-    return datetime.datetime.fromtimestamp(ms / 1000).astimezone().strftime("%Y-%m-%d %H:%M")
-
-
-def cmd_horizon(args):
-    """Print the recorded refresh-deadline ledger per account: when each
-    account's refresh-token deadline moved, by how much, and whether the chain
-    has been capped. This is the evidence for the question keep-alive rests on
-    — whether refreshing a parked account can keep it alive at all, or whether
-    only a fresh `auth` can. Entries are appended by `refresh` (both its grants
-    and its read-only sweep); an unchanged deadline is not re-recorded, so a gap
-    between rows means the deadline sat still across those daily runs."""
-    cfg = load_config()
-    names = [args.name] if args.name else sorted(
-        {a for pr in cfg["profiles"].values() for a in (pr.get("accounts") or [])}
-    )
-    for name in names:
-        snap = load_snapshot(name) or {}
-        hist = snap.get("horizonHistory") or []
-        head = c(name, "bold")
-        if snap.get("horizonStalledSince"):
-            head += "  " + c(
-                f"capped at {_fmt_ms(snap.get('horizonStalledExp'))} "
-                f"since {str(snap['horizonStalledSince'])[:10]} "
-                f"→ claude-profile auth {name}", "red")
-        print(head)
-        if not hist:
-            print(c("  no observations yet — the ledger fills as `refresh` runs", "dim"))
-            continue
-        prev = None
-        for e in hist:
-            exp = e.get("exp")
-            gain = e.get("gainedSeconds")
-            if gain is None and prev and exp:
-                gain = round((exp - prev) / 1000)
-            if gain is None:
-                delta = ""
-            elif abs(gain) <= HORIZON_SLACK:
-                delta = "  " + c("+0 — did not move", "red")
-            else:
-                delta = "  " + c(f"{gain / 86400:+.2f}d", "green" if gain > 0 else "red")
-            arm = "live" if e.get("live") else "parked"
-            print(f"  {e.get('at', '?')}  {e.get('kind', '?'):8} {arm:6} → {_fmt_ms(exp)}{delta}")
-            prev = exp
-
-
-# ── keep-alive daemon (launchd) ─────────────────────────────────────────────
-
-def launchd_plist_path():
-    return os.path.join(HOME, "Library", "LaunchAgents", f"{LAUNCHD_LABEL}.plist")
-
-
-def _daemon_launchd(args):
-    plist = launchd_plist_path()
-    uid = os.getuid()
-    if args.action == "install":
-        script = os.path.abspath(__file__)
-        log = os.path.join(STATE_DIR, "refresh.log")
-        os.makedirs(STATE_DIR, exist_ok=True)
-        content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>{LAUNCHD_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{sys.executable}</string>
-        <string>{script}</string>
-        <string>refresh</string>
-        <string>--quiet</string>
-        <string>--jitter</string>
-        <string>{int(args.jitter)}</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>17</integer></dict>
-    <key>RunAtLoad</key><true/>
-    <key>StandardOutPath</key><string>{log}</string>
-    <key>StandardErrorPath</key><string>{log}</string>
-</dict>
-</plist>
-"""
-        os.makedirs(os.path.dirname(plist), exist_ok=True)
-        atomic_write(plist, content)
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True
-        )
-        res = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", plist], capture_output=True, text=True
-        )
-        if res.returncode != 0:
-            die(f"launchctl bootstrap failed: {res.stderr.strip()}")
-        print(
-            f"daemon installed: daily refresh at 12:17 (+ on load), "
-            f"up to {int(args.jitter)}s jitter before a due grant — log: {log}"
-        )
-    elif args.action == "uninstall":
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True
-        )
-        try:
-            os.unlink(plist)
-        except FileNotFoundError:
-            pass
-        print("daemon uninstalled")
-    else:  # status
-        res = subprocess.run(
-            ["launchctl", "print", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True, text=True
-        )
-        loaded = res.returncode == 0
-        print(f"plist: {plist} ({'present' if os.path.exists(plist) else 'absent'})")
-        print(f"launchd: {'loaded' if loaded else 'not loaded'}")
-        log = os.path.join(STATE_DIR, "refresh.log")
-        if os.path.exists(log):
-            with open(log) as f:
-                tail = f.readlines()[-6:]
-            print("recent log:")
-            for line in tail:
-                print(f"  {line.rstrip()}")
-
-
-SYSTEMD_UNIT = "claude-profile-refresh"
-
-
-def _sctl(*a):
-    """systemctl --user with XDG_RUNTIME_DIR filled in (SSH sessions lack it)."""
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    return subprocess.run(["systemctl", "--user", *a], capture_output=True, text=True, env=env)
-
-
-def _daemon_systemd(args):
-    import getpass
-
-    unit_dir = os.path.join(
-        os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "systemd", "user"
-    )
-    svc = os.path.join(unit_dir, f"{SYSTEMD_UNIT}.service")
-    timer = os.path.join(unit_dir, f"{SYSTEMD_UNIT}.timer")
-    log = os.path.join(STATE_DIR, "refresh.log")
-    user = getpass.getuser()
-
-    if args.action == "install":
-        os.makedirs(unit_dir, exist_ok=True)
-        os.makedirs(STATE_DIR, exist_ok=True)
-        script = os.path.abspath(__file__)
-        atomic_write(svc, f"""[Unit]
-Description=claude-profile keep-alive (renew parked account refresh tokens)
-
-[Service]
-Type=oneshot
-ExecStart={sys.executable} {script} refresh --quiet --jitter {int(args.jitter)}
-StandardOutput=append:{log}
-StandardError=append:{log}
-""")
-        atomic_write(timer, f"""[Unit]
-Description=claude-profile keep-alive timer
-
-[Timer]
-OnCalendar=*-*-* 12:17:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-""")
-        # Linger first, so the user manager runs (and keeps the timer firing
-        # while logged out — the point of it on a server).
-        linger = subprocess.run(["loginctl", "enable-linger", user], capture_output=True, text=True)
-        if linger.returncode != 0:
-            linger = subprocess.run(
-                ["sudo", "-n", "loginctl", "enable-linger", user], capture_output=True, text=True
-            )
-        _sctl("daemon-reload")
-        res = _sctl("enable", "--now", f"{SYSTEMD_UNIT}.timer")
-        if res.returncode != 0:
-            die(
-                f"systemctl --user enable failed: {(res.stderr or res.stdout).strip()} "
-                f"(a bus error? run `claude-profile daemon install` from an interactive login)"
-            )
-        print(
-            f"daemon installed: systemd --user timer '{SYSTEMD_UNIT}.timer', daily 12:17 "
-            f"(Persistent catch-up), up to {int(args.jitter)}s jitter — log: {log}"
-        )
-        if linger.returncode != 0:
-            print(
-                f"  ⚠ could not enable linger — run `sudo loginctl enable-linger {user}` so the "
-                f"timer fires while you're logged out",
-                file=sys.stderr,
-            )
-    elif args.action == "uninstall":
-        _sctl("disable", "--now", f"{SYSTEMD_UNIT}.timer")
-        for f in (timer, svc):
-            try:
-                os.unlink(f)
-            except FileNotFoundError:
-                pass
-        _sctl("daemon-reload")
-        print("daemon uninstalled")
-    else:  # status
-        print(f"unit: {timer} ({'present' if os.path.exists(timer) else 'absent'})")
-        active = _sctl("is-active", f"{SYSTEMD_UNIT}.timer").stdout.strip() or "inactive"
-        enabled = _sctl("is-enabled", f"{SYSTEMD_UNIT}.timer").stdout.strip() or "disabled"
-        print(f"systemd --user timer: {active} / {enabled}")
-        for line in _sctl("list-timers", "--all", f"{SYSTEMD_UNIT}.timer").stdout.splitlines():
-            if SYSTEMD_UNIT in line:
-                print(f"  next: {line.strip()}")
-        linger = subprocess.run(
-            ["loginctl", "show-user", user, "-p", "Linger"], capture_output=True, text=True
-        ).stdout.strip()
-        print(f"  {linger or 'Linger=?'}")
-        if os.path.exists(log):
-            with open(log) as f:
-                tail = f.readlines()[-6:]
-            print("recent log:")
-            for line in tail:
-                print(f"  {line.rstrip()}")
-
-
-def cmd_daemon(args):
-    (_daemon_launchd if IS_MACOS else _daemon_systemd)(args)
 
 
 # ── commands ────────────────────────────────────────────────────────────────
@@ -1687,10 +1222,11 @@ def token_horizon(blob, snap):
     else:
         parts.append("refresh ?")
     snap = snap or {}
-    when = snap.get("lastRefreshedAt")
-    label, when = ("rotated", when) if when else ("saved", snap.get("savedAt"))
+    # `saved` only: nothing renews a parked pair on a schedule any more, so a
+    # "rotated" date would just be the day the retired keep-alive last ran.
+    when = snap.get("savedAt")
     if when:
-        parts.append(f"{label} {str(when)[:10]}")
+        parts.append(f"saved {str(when)[:10]}")
     return "token: " + " · ".join(parts)
 
 
@@ -1740,8 +1276,7 @@ def cmd_status(args):
             is_live = acct == current
             parked_blob = read_parked_cred(acct)
             # live account's true expiry lives in the live Keychain item (Claude
-            # Code refreshes it); parked accounts show their parked pair, which
-            # is what the keep-alive daemon renews.
+            # Code refreshes it); parked accounts show their parked pair.
             blob = read_live_cred(d) if is_live else parked_blob
             tag = "ACTIVE " if is_live else ("parked " if parked_blob else "UNSAVED")
             email = (snap or {}).get("oauthAccount", {}) or {}
@@ -1763,8 +1298,6 @@ def cmd_status(args):
             tag_cell = {"ACTIVE ": ("green", "bold"), "parked ": ("dim",)}.get(tag, ("red",))
             print(f"    {marker} {name_cell} {c(tag, *tag_cell)} {c(email, 'dim')}{usage}")
             th = token_horizon(blob, snap)
-            if not account_keepalive(cfg, acct):
-                th = (th + "  · keep-alive OFF") if th else "keep-alive OFF"
             if th:
                 print(c(f"        {th}", "dim"))
         if accounts and current is None:
@@ -2198,9 +1731,10 @@ def cmd_rotate(args):
     current = current_account_of(cfg, profile)
 
     # Aging-refresh-token nudge — a parked account nearing refresh expiry means
-    # a forced re-login later. Suppressed under --quiet so it doesn't print on
-    # every `claude` launch (the wrapper's auto-rotate runs quiet); the daemon
-    # keeps parked tokens fresh anyway, and `status` still surfaces it.
+    # a forced re-login, and nothing can defer it: the deadline is fixed at
+    # interactive login and no grant moves it. Suppressed under --quiet so it
+    # doesn't print on every `claude` launch (the wrapper's auto-rotate runs
+    # quiet); `status` still surfaces it.
     if not args.quiet:
         for acct in accounts:
             if acct == current:
@@ -2281,35 +1815,6 @@ def cmd_auto(args):
     save_config(cfg)
     print(c(f"profile \"{profile}\": auto-rotate ", "green")
           + c(args.mode, "bold", "green" if args.mode == "on" else "yellow"))
-
-
-def cmd_keepalive(args):
-    """Per-account switch for keep-alive refresh-token renewal. No mode → report
-    (all, or one account); mode on|off → set and persist to config."""
-    cfg = load_config()
-    known = {a for p in cfg["profiles"].values() for a in (p.get("accounts") or [])}
-    known |= saved_account_names()
-    if args.mode is None:
-        targets = sorted(known)
-        if args.account:
-            if args.account not in known:
-                die(f"unknown account \"{args.account}\"")
-            targets = [args.account]
-        print(c("keep-alive (refresh-token renewal):", "bold"))
-        for a in targets:
-            ka = account_keepalive(cfg, a)
-            print(f"  {a:<12} " + c("on" if ka else "OFF", "green" if ka else "yellow"))
-        return
-    if not args.account or args.account not in known:
-        die(f"unknown account \"{args.account or ''}\" — see `claude-profile keepalive`")
-    cfg.setdefault("keepalive", {})[args.account] = args.mode == "on"
-    save_config(cfg)
-    ka = args.mode == "on"
-    print(c(f"keep-alive for \"{args.account}\": ", "green")
-          + c("on" if ka else "OFF", "bold", "green" if ka else "yellow"))
-    if args.mode == "off":
-        print("  its refresh token will now age out on its own — `claude-profile auth "
-              f"{args.account}` (or keepalive on) before it expires")
 
 
 def cmd_usage(args):
@@ -2464,51 +1969,10 @@ def main():
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_rotate)
 
-    p = sub.add_parser(
-        "refresh",
-        help="keep-alive: renew parked accounts' refresh tokens via the OAuth refresh grant",
-    )
-    p.add_argument("name", nargs="?", help="account to refresh (default: all configured)")
-    p.add_argument(
-        "--min-days-left",
-        type=float,
-        default=14,
-        help="only refresh when the refresh token has fewer days left (default 14)",
-    )
-    p.add_argument("--force", action="store_true", help="refresh even if fresh or live (unsafe when live)")
-    p.add_argument("--quiet", action="store_true", help="suppress nothing-to-do lines (daemon mode)")
-    p.add_argument(
-        "--jitter",
-        type=float,
-        default=0,
-        metavar="SECONDS",
-        help="when a grant is due, first sleep a random 0..SECONDS to decorrelate timing (default 0)",
-    )
-    p.set_defaults(func=cmd_refresh)
-
-    p = sub.add_parser("daemon", help="manage the launchd keep-alive daemon")
-    p.add_argument("action", choices=["install", "uninstall", "status"])
-    p.add_argument(
-        "--jitter",
-        type=float,
-        default=3600,
-        metavar="SECONDS",
-        help="install: max random pre-grant delay baked into the plist (default 3600 = 1h)",
-    )
-    p.set_defaults(func=cmd_daemon)
-
     p = sub.add_parser("auto", help="toggle auto-rotation for a profile")
     p.add_argument("mode", choices=["on", "off"])
     p.add_argument("--profile")
     p.set_defaults(func=cmd_auto)
-
-    p = sub.add_parser(
-        "keepalive",
-        help="per-account: whether keep-alive renews its refresh token (no args = report)",
-    )
-    p.add_argument("account", nargs="?")
-    p.add_argument("mode", nargs="?", choices=["on", "off"])
-    p.set_defaults(func=cmd_keepalive)
 
     p = sub.add_parser("usage", help="show per-account usage")
     p.add_argument("--profile")
@@ -2524,13 +1988,6 @@ def main():
     p.add_argument("--all", action="store_true", help="every account across all profiles")
     p.add_argument("--fresh", action="store_true", help="accepted for symmetry (raw fetch is always live)")
     p.set_defaults(func=cmd_usage_json)
-
-    p = sub.add_parser(
-        "horizon",
-        help="show the recorded refresh-token deadline ledger (did keep-alive actually gain time?)",
-    )
-    p.add_argument("name", nargs="?", help="account to report (default: all configured)")
-    p.set_defaults(func=cmd_horizon)
 
     p = sub.add_parser(
         "anchor-window",

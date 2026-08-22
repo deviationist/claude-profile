@@ -179,11 +179,6 @@ class ProfileFlags(unittest.TestCase):
         self.assertFalse(cp.profile_exhaust_credits(cfg, "p"))
         self.assertTrue(cp.profile_exhaust_credits(cfg, "q"))
 
-    def test_keepalive_default_true(self):
-        self.assertTrue(cp.account_keepalive({}, "x"))
-        self.assertTrue(cp.account_keepalive({"keepalive": {"x": True}}, "x"))
-        self.assertFalse(cp.account_keepalive({"keepalive": {"x": False}}, "x"))
-
 
 # ── display labels + `resolve --json` (the single-call contract) ────────────
 # claude-usage (and through it the statusline) asks exactly one question —
@@ -384,257 +379,15 @@ class OAuthSetting(unittest.TestCase):
 
 
 # ── refresh gate (the keep-alive "is a grant due?" decision) ────────────────
-class RefreshGate(unittest.TestCase):
-    def setUp(self):
-        self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["a", "b"]}}}
-        self._caf, self._rpc = cp.current_account_of, cp.read_parked_cred
-        self._ls = cp.load_snapshot
-        cp.current_account_of = lambda cfg, prof: "a"  # "a" is the live account
-        cp.load_snapshot = lambda n: {}                # no cap latched by default
-
-    def tearDown(self):
-        cp.current_account_of, cp.read_parked_cred = self._caf, self._rpc
-        cp.load_snapshot = self._ls
-
-    def test_live_account_skipped(self):
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "a", 14, False)
-        self.assertFalse(act)
-        self.assertIn("live", reason)
-
-    def test_fresh_parked_skipped(self):
-        cp.read_parked_cred = lambda n: oauth_blob(days_left=30)
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertFalse(act)
-        self.assertIn("fresh", reason)
-
-    def test_due_when_near_expiry(self):
-        cp.read_parked_cred = lambda n: oauth_blob(days_left=5)
-        act, blob, oauth, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertTrue(act)
-        self.assertIsNone(reason)
-        self.assertEqual(oauth["refreshToken"], "r")
-
-    def test_expired_reported(self):
-        cp.read_parked_cred = lambda n: oauth_blob(days_left=-1)
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertFalse(act)
-        self.assertIn("EXPIRED", reason)
-
-    def test_force_overrides_fresh(self):
-        cp.read_parked_cred = lambda n: oauth_blob(days_left=30)
-        act, *_ = cp.refresh_gate(self.cfg, "b", 14, True)
-        self.assertTrue(act)
-
-    def test_no_parked_credential(self):
-        cp.read_parked_cred = lambda n: None
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertFalse(act)
-        self.assertIn("no parked", reason)
-
-    def _capped(self, days_left=5):
-        """A parked blob plus a latch recording that its deadline is capped."""
-        blob = oauth_blob(days_left=days_left)
-        rexp = json.loads(blob)["claudeAiOauth"]["refreshTokenExpiresAt"]
-        cp.read_parked_cred = lambda n: blob
-        cp.load_snapshot = lambda n: {"horizonStalledExp": rexp}
-        return rexp
-
-    def test_capped_chain_stops_burning_grants(self):
-        self._capped()
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertFalse(act)
-        self.assertIn("capped", reason)
-        self.assertIn("auth b", reason)
-
-    def test_force_still_grants_on_a_capped_chain(self):
-        """The swap-in path forces a grant to make a stale access token usable —
-        a capped refresh deadline must not block that."""
-        self._capped()
-        act, *_ = cp.refresh_gate(self.cfg, "b", 14, True)
-        self.assertTrue(act)
-
-    def test_latch_from_a_previous_chain_does_not_stick(self):
-        """`auth` mints a chain with a new deadline; the stale latch must stop
-        matching so keep-alive resumes on its own."""
-        self._capped()
-        stale = cp.load_snapshot("b")["horizonStalledExp"]
-        cp.read_parked_cred = lambda n: oauth_blob(days_left=10)   # re-authed
-        cp.load_snapshot = lambda n: {"horizonStalledExp": stale}
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertTrue(act)
-        self.assertIsNone(reason)
-
-    def test_expired_beats_capped(self):
-        """An already-dead token reports as expired, not merely capped."""
-        self._capped(days_left=-1)
-        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
-        self.assertFalse(act)
-        self.assertIn("EXPIRED", reason)
 
 
 # ── refresh-deadline ledger (can keep-alive actually gain time?) ────────────
-class HorizonAdvanced(unittest.TestCase):
-    def test_rolling_chain_advances(self):
-        now = int(cp.time.time() * 1000)
-        self.assertTrue(cp.horizon_advanced(now, now + 86400 * 1000))
-
-    def test_capped_chain_does_not(self):
-        ceiling = int(cp.time.time() * 1000) + 86400 * 1000
-        self.assertFalse(cp.horizon_advanced(ceiling, ceiling))
-
-    def test_seconds_of_drift_still_counts_as_capped(self):
-        """A capped chain recomputes the deadline as now + what's left, so two
-        grants land seconds apart — that must not read as progress."""
-        ceiling = int(cp.time.time() * 1000) + 86400 * 1000
-        self.assertFalse(cp.horizon_advanced(ceiling, ceiling + 7000))
-
-    def test_not_comparable(self):
-        self.assertIsNone(cp.horizon_advanced(None, 123))
-        self.assertIsNone(cp.horizon_advanced(123, None))
 
 
-class RecordHorizon(unittest.TestCase):
-    def test_appends_with_gain(self):
-        snap = {}
-        cp.record_horizon(snap, 2_000_000, "grant", prev=1_000_000, live=False)
-        (e,) = snap["horizonHistory"]
-        self.assertEqual(e["kind"], "grant")
-        self.assertEqual(e["exp"], 2_000_000)
-        self.assertEqual(e["gainedSeconds"], 1000)
-        self.assertFalse(e["live"])
-
-    def test_observed_collapses_unchanged_deadline(self):
-        snap = {}
-        self.assertTrue(cp.record_horizon(snap, 5, "observed"))
-        self.assertFalse(cp.record_horizon(snap, 5, "observed"))
-        self.assertTrue(cp.record_horizon(snap, 6, "observed"))
-        self.assertEqual(len(snap["horizonHistory"]), 2)
-
-    def test_grant_never_collapses(self):
-        """Two capped grants are two rows — the repetition IS the evidence."""
-        snap = {}
-        cp.record_horizon(snap, 5, "grant")
-        cp.record_horizon(snap, 5, "grant")
-        self.assertEqual(len(snap["horizonHistory"]), 2)
-
-    def test_ledger_is_bounded(self):
-        snap = {}
-        for i in range(cp.HORIZON_HISTORY_MAX + 25):
-            cp.record_horizon(snap, i, "grant")
-        self.assertEqual(len(snap["horizonHistory"]), cp.HORIZON_HISTORY_MAX)
-        self.assertEqual(snap["horizonHistory"][-1]["exp"], cp.HORIZON_HISTORY_MAX + 24)
 
 
-class RefreshAccountHorizon(unittest.TestCase):
-    """refresh_account must tell a grant that bought time apart from one that
-    returned 200 and bought nothing."""
-
-    def setUp(self):
-        self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["b"]}}}
-        self.saved = {}
-        self.store = {"b": oauth_blob(days_left=5)}
-        self._orig = {n: getattr(cp, n) for n in (
-            "current_account_of", "read_parked_cred", "write_parked_cred",
-            "oauth_refresh_grant", "load_snapshot", "save_snapshot", "mutation_lock")}
-        cp.current_account_of = lambda cfg, prof: None       # nothing live
-        cp.read_parked_cred = lambda n: self.store.get(n)
-        cp.write_parked_cred = lambda n, blob: self.store.__setitem__(n, blob)
-        cp.load_snapshot = lambda n: dict(self.saved)
-        # replace, don't merge — the real save_snapshot rewrites the whole file,
-        # so a key the code popped must actually disappear
-        cp.save_snapshot = lambda n, snap: (self.saved.clear(), self.saved.update(snap))
-
-    def tearDown(self):
-        for n, v in self._orig.items():
-            setattr(cp, n, v)
-
-    def _server(self, refresh_expires_in):
-        cp.oauth_refresh_grant = lambda rt: {
-            "access_token": "new", "expires_in": 28800,
-            "refresh_token": "r2", "refresh_token_expires_in": refresh_expires_in,
-        }
-
-    def test_rolling_reports_plain_refresh(self):
-        self._server(30 * 86400)
-        msg = cp.refresh_account(self.cfg, "b", 14, False, True)
-        self.assertIn("refreshed", msg)
-        self.assertNotIn(cp.HORIZON_STALLED_MARK, msg)
-        self.assertNotIn("horizonStalledExp", self.saved)
-
-    def test_capped_chain_is_escalated_then_quiet(self):
-        # A ceiling that stays put: each grant is told what little is left of it.
-        left = [5 * 86400]
-        cp.oauth_refresh_grant = lambda rt: {
-            "access_token": "new", "expires_in": 28800,
-            "refresh_token": "r2", "refresh_token_expires_in": left[0],
-        }
-        first = cp.refresh_account(self.cfg, "b", 14, True, True)
-        self.assertIn(cp.HORIZON_STALLED_MARK, first)
-        self.assertIn("auth b", first)
-
-        left[0] -= 5           # same instant, a few seconds of drift later
-        second = cp.refresh_account(self.cfg, "b", 14, True, True)
-        self.assertIn(cp.HORIZON_CAPPED_MARK, second)
-        self.assertNotIn(cp.HORIZON_STALLED_MARK, second)
-
-    def test_recovery_clears_the_stall(self):
-        self._server(5 * 86400)
-        cp.refresh_account(self.cfg, "b", 14, True, True)
-        self.assertIn("horizonStalledSince", self.saved)
-        self._server(30 * 86400)          # e.g. after `auth` opened a new window
-        msg = cp.refresh_account(self.cfg, "b", 14, True, True)
-        self.assertNotIn(cp.HORIZON_STALLED_MARK, msg)
-        self.assertNotIn("horizonStalledSince", self.saved)
-
-    def test_ledger_records_every_grant(self):
-        self._server(30 * 86400)
-        cp.refresh_account(self.cfg, "b", 14, True, True)
-        cp.refresh_account(self.cfg, "b", 14, True, True)
-        self.assertEqual(len(self.saved["horizonHistory"]), 2)
-        self.assertTrue(all(e["kind"] == "grant" for e in self.saved["horizonHistory"]))
 
 
-class ObserveHorizons(unittest.TestCase):
-    """The read-only comparison arm: samples the live account too, and must
-    never make a network call or touch a credential."""
-
-    def setUp(self):
-        self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["a", "b"]}}}
-        self.saved = {}
-        self._orig = {n: getattr(cp, n) for n in (
-            "current_account_of", "read_parked_cred", "read_live_cred",
-            "write_parked_cred", "write_live_cred", "oauth_refresh_grant",
-            "load_snapshot", "save_snapshot")}
-        cp.current_account_of = lambda cfg, prof: "a"        # "a" is live
-        cp.read_live_cred = lambda d: oauth_blob(days_left=30)
-        cp.read_parked_cred = lambda n: oauth_blob(days_left=1)
-        cp.load_snapshot = lambda n: dict(self.saved.get(n, {}))
-        cp.save_snapshot = lambda n, snap: self.saved.__setitem__(n, snap)
-        for n in ("write_parked_cred", "write_live_cred", "oauth_refresh_grant"):
-            setattr(cp, n, self._boom)
-
-    def tearDown(self):
-        for n, v in self._orig.items():
-            setattr(cp, n, v)
-
-    @staticmethod
-    def _boom(*a, **k):
-        raise AssertionError("observe_horizons must not write or hit the network")
-
-    def test_samples_both_arms_and_labels_them(self):
-        cp.observe_horizons(self.cfg)
-        self.assertTrue(self.saved["a"]["horizonHistory"][-1]["live"])
-        self.assertFalse(self.saved["b"]["horizonHistory"][-1]["live"])
-
-    def test_second_sweep_adds_nothing_when_nothing_moved(self):
-        cp.observe_horizons(self.cfg)
-        cp.observe_horizons(self.cfg)
-        self.assertEqual(len(self.saved["a"]["horizonHistory"]), 1)
-
-    def test_missing_credential_is_skipped_not_fatal(self):
-        cp.read_parked_cred = lambda n: None
-        cp.observe_horizons(self.cfg)
-        self.assertNotIn("b", self.saved)
 
 
 # ── live-session swap guard (+ --force kills) ───────────────────────────────
@@ -934,6 +687,68 @@ class RefreshHealth(unittest.TestCase):
 
 
 # ── account_usage_raw (raw usage JSON, parked-token refresh) ────────────────
+class RefreshParkedAccess(unittest.TestCase):
+    """The on-demand parked grant. Not a keep-alive — it exists so `usage-json`
+    and `anchor-window` can use a parked account whose 8-hour access token has
+    lapsed. It must never spend a request on a doomed grant, and must never
+    declare success for a pair that did not survive the write."""
+
+    def setUp(self):
+        self.store = {}
+        self._orig = {n: getattr(cp, n) for n in
+                      ("read_parked_cred", "write_parked_cred", "oauth_refresh_grant")}
+        cp.read_parked_cred = lambda n: self.store.get(n)
+        cp.write_parked_cred = lambda n, blob: self.store.__setitem__(n, blob)
+        self.grants = []
+        cp.oauth_refresh_grant = self._grant
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    def _grant(self, rt):
+        self.grants.append(rt)
+        return {"access_token": "FRESH", "expires_in": 28800,
+                "refresh_token": "r2", "refresh_token_expires_in": 30 * 86400}
+
+    def test_success_reparks_a_usable_pair(self):
+        self.store["b"] = expired_blob()
+        self.assertTrue(cp.refresh_parked_access("b"))
+        self.assertEqual(cp.token_from_blob(self.store["b"]), "FRESH")
+
+    def test_no_parked_credential_declines_without_a_grant(self):
+        self.assertFalse(cp.refresh_parked_access("b"))
+        self.assertEqual(self.grants, [])
+
+    def test_dead_refresh_token_declines_without_a_grant(self):
+        """The deadline is fixed at login and no grant moves it, so once it has
+        passed there is nothing to spend a request on."""
+        self.store["b"] = oauth_blob(days_left=-1)
+        self.assertFalse(cp.refresh_parked_access("b"))
+        self.assertEqual(self.grants, [])
+
+    def test_blob_without_a_refresh_token_declines(self):
+        self.store["b"] = json.dumps({"claudeAiOauth": {"accessToken": "a"}})
+        self.assertFalse(cp.refresh_parked_access("b"))
+        self.assertEqual(self.grants, [])
+
+    def test_grant_failure_leaves_the_parked_pair_untouched(self):
+        before = expired_blob()
+        self.store["b"] = before
+        def boom(rt):
+            raise RuntimeError("HTTP 400")
+        cp.oauth_refresh_grant = boom
+        self.assertFalse(cp.refresh_parked_access("b"))
+        self.assertEqual(self.store["b"], before)
+
+    def test_readback_mismatch_is_not_success(self):
+        """A new refresh token that did not survive the write would be lost
+        forever, so a failed read-back must not report success."""
+        self.store["b"] = expired_blob()
+        cp.write_parked_cred = lambda n, blob: None        # silently drops the write
+        self.assertFalse(cp.refresh_parked_access("b"))
+
+
 class AccountUsageRaw(unittest.TestCase):
     def setUp(self):
         self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["live", "parked"]}}}
@@ -941,7 +756,7 @@ class AccountUsageRaw(unittest.TestCase):
         cp.STATE_DIR = tempfile.mkdtemp()                  # isolate the raw-usage cache
         self._orig = {n: getattr(cp, n) for n in
                       ("current_account_of", "read_live_cred", "read_parked_cred",
-                       "fetch_usage", "refresh_account", "mutation_lock", "profile_dir")}
+                       "fetch_usage", "refresh_parked_access", "mutation_lock", "profile_dir")}
         cp.current_account_of = lambda cfg, prof: "live"   # "live" is live, "parked" isn't
         cp.profile_dir = lambda cfg, prof: "/x"
         cp.fetch_usage = lambda tok: {"ok": tok}           # echo the token actually used
@@ -957,7 +772,7 @@ class AccountUsageRaw(unittest.TestCase):
         cp.read_live_cred = lambda d: oauth_blob(access="A")
         cp.read_parked_cred = lambda n: None
         seen = {"refresh": 0}
-        cp.refresh_account = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
+        cp.refresh_parked_access = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
         self.assertEqual(cp.account_usage_raw(self.cfg, "live"), {"ok": "A"})
         self.assertEqual(seen["refresh"], 0)               # a live account is never refreshed
 
@@ -965,22 +780,22 @@ class AccountUsageRaw(unittest.TestCase):
         st = {"blob": expired_blob()}
         cp.read_live_cred = lambda d: None
         cp.read_parked_cred = lambda n: st["blob"]
-        def fake_refresh(cfg, name, min_days_left, force, quiet):
+        def fake_refresh(name):
             st["blob"] = oauth_blob(access="FRESH")        # simulate a successful grant
-        cp.refresh_account = fake_refresh
+        cp.refresh_parked_access = fake_refresh
         self.assertEqual(cp.account_usage_raw(self.cfg, "parked"), {"ok": "FRESH"})
 
     def test_parked_refresh_fails_returns_none(self):
         cp.read_live_cred = lambda d: None
         cp.read_parked_cred = lambda n: expired_blob()     # stays expired even after refresh
-        cp.refresh_account = lambda *a, **k: None
+        cp.refresh_parked_access = lambda *a, **k: None
         self.assertIsNone(cp.account_usage_raw(self.cfg, "parked"))
 
     def test_live_expired_returns_none_never_refreshes(self):
         cp.read_live_cred = lambda d: expired_blob()
         cp.read_parked_cred = lambda n: None
         seen = {"refresh": 0}
-        cp.refresh_account = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
+        cp.refresh_parked_access = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
         self.assertIsNone(cp.account_usage_raw(self.cfg, "live"))
         self.assertEqual(seen["refresh"], 0)               # invariant: live creds untouched
 
