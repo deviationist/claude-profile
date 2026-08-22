@@ -112,7 +112,12 @@ python3 stdlib):
   grant); a stall is escalated as a failure once per stall
   (`HORIZON_STALLED_MARK`, notify-worthy) and reported quietly on later sweeps
   (`HORIZON_CAPPED_MARK`), latched by `horizonStalledSince`/`horizonStalledExp`
-  in the snapshot and cleared as soon as a grant gains time again.
+  in the snapshot and cleared as soon as a grant gains time again. Once latched,
+  `refresh_gate()` skips the grant entirely (a grant there provably buys
+  nothing) — matched on the *deadline*, not a flag, so a re-`auth` stops it
+  matching and keep-alive resumes by itself; `--force` bypasses it so the
+  swap-in path can still refresh a stale access token, and an already-expired
+  token still reports EXPIRED rather than capped.
   `record_horizon()` appends to a bounded per-account ledger
   (`horizonHistory`); `observe_horizons()` samples every account read-only
   after each sweep — **including the live one**, which no grant may touch, so
