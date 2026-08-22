@@ -62,7 +62,8 @@ python3 stdlib):
   `usage-json [--all|--profile P|--account A]` (porcelain for
   `claude-usage --all`: emits `<account>\t<compact-raw-usage-json>` per line,
   empty field = unavailable; `account_usage_raw()` refreshes an expired *parked*
-  access token in place first — under the mutation lock, via `refresh_account` —
+  access token in place first — under the mutation lock, via
+  `refresh_parked_access()` —
   so parked accounts stay renderable; **never touches a live credential**, so a
   live account with an idle-expired token comes back empty until Claude Code
   refreshes it).
@@ -83,58 +84,30 @@ python3 stdlib):
   threshold `CREDITS_EXHAUSTED_PCT=99`, since Claude stops just before the cap)
   — so auto mode burns credits first, then swaps.
   `status` prints a per-account **token line** (access-token life, refresh-
-  token life + absolute expiry date, and `saved`/`rotated <date>` — the
-  `rotated` label confirms the keep-alive ran; live account reads the live
-  Keychain item, parked accounts their parked pair) and warns when a parked
+  token life + absolute expiry date, and `saved <date>`; live account reads the
+  live Keychain item, parked accounts their parked pair) and warns when a parked
   refresh token nears/passes expiry
   (`⚠ … → claude-profile auth X`) — the same nudge also prints at every
   `claude` launch of an auto profile — and lists saved-but-unconfigured
-  accounts so strays are visible. Keep-alive: `refresh [<name>]
-  [--min-days-left N] [--force] [--jitter SECONDS]` runs the OAuth refresh
-  grant (Claude Code's OAuth client id + endpoints + User-Agent, supplied
-  per machine via the config `oauth` block / `CLAUDE_PROFILE_*` env — never
-  committed, see `oauth_setting()`; transport is curl w/ the configured UA,
-  since urllib is CF-1010-blocked) on parked, non-live accounts and re-parks
-  the new pair (write + read-back verify; mutation lock vs manual swaps; live
-  accounts never touched). `refresh_gate()` is the single source of truth
-  for "is a grant due?" — shared by the real refresh and the `--jitter`
-  pre-check, which sleeps a random `0..SECONDS` (pre-lock) only when a grant
-  is actually due. **A grant is judged on whether the deadline moved, not on
-  HTTP 200**: the server may either roll the refresh token (new deadline =
-  now + lifetime) or cap the whole chain at one absolute instant, and under a
-  cap every grant returns that same date, so keep-alive cannot work at all and
-  only `auth` opens a new window. **Every chain measured so far is capped** —
-  four across two hosts, parked and live — including a live one whose deadline
-  held to within a second over two days of Claude Code refreshing it, so being
-  in use does not re-anchor a window either. Treat `rolling` as a branch the
-  code must handle, not as observed behaviour. `horizon_advanced()` classifies it
-  (`HORIZON_SLACK` apart, since a capped chain still drifts by seconds per
-  grant); a stall is escalated as a failure once per stall
-  (`HORIZON_STALLED_MARK`, notify-worthy) and reported quietly on later sweeps
-  (`HORIZON_CAPPED_MARK`), latched by `horizonStalledSince`/`horizonStalledExp`
-  in the snapshot and cleared as soon as a grant gains time again. Once latched,
-  `refresh_gate()` skips the grant entirely (a grant there provably buys
-  nothing) — matched on the *deadline*, not a flag, so a re-`auth` stops it
-  matching and keep-alive resumes by itself; `--force` bypasses it so the
-  swap-in path can still refresh a stale access token, and an already-expired
-  token still reports EXPIRED rather than capped.
-  `record_horizon()` appends to a bounded per-account ledger
-  (`horizonHistory`); `observe_horizons()` samples every account read-only
-  after each sweep — **including the live one**, which no grant may touch, so
-  the ledger carries the rolling-vs-capped comparison — and `horizon [<name>]`
-  prints it. Consecutive `observed` rows with an unchanged deadline collapse,
-  so a gap between rows means nothing moved across those runs. Keep-alive is **per-account opt-out**: `keepalive
-  [<account>] [on|off]` (no args = report) writes the config `keepalive` map
-  (account → bool, default true, `account_keepalive()`); the daemon sweep
-  (`refresh` with no name) skips off accounts, but an explicit `refresh
-  <account>` ignores the toggle. `status` shows `keep-alive OFF`.
-  `daemon install [--jitter N]|uninstall|status` = keep-alive scheduler,
-  daily 12:17, running `refresh --quiet --jitter <N>` (default 3600), logging
-  to the state dir. **macOS** = launchd agent (`com.claude-profile.refresh`,
-  RunAtLoad). **Linux** = systemd `--user` timer (`claude-profile-refresh`,
-  Persistent catch-up) + `loginctl enable-linger` so it fires while logged
-  out; `_sctl()` injects `XDG_RUNTIME_DIR` for SSH sessions. Dispatched by
-  `IS_MACOS`.
+  accounts so strays are visible.
+  **Refresh-token deadlines cannot be extended.** A refresh grant returns a new
+  refresh token carrying the *same* absolute expiry, fixed when the chain was
+  created by an interactive login; neither refreshing nor using an account moves
+  it. Measured on four chains across two hosts, parked and live, including a
+  live one whose deadline held to within a second over two days of Claude Code
+  refreshing it. So a re-login is unavoidable, roughly monthly, **per account
+  per machine** — each host's login mints its own chain with its own deadline.
+  A keep-alive daemon (`refresh`/`daemon`/`keepalive`/`horizon` commands, a
+  launchd agent and a systemd `--user` timer) used to exist on the premise that
+  rotation held the deadline off; it was removed once measurement disproved
+  that. Do not reintroduce it without evidence of a *rolling* chain.
+  `refresh_parked_access()` is what survives: a single on-demand grant that
+  mints a fresh **access** token for a parked account and re-parks the pair
+  (write + read-back verify, so a new refresh token is never left only in
+  memory). It exists solely so `usage-json` and `anchor-window` can use a parked
+  account past the 8-hour access-token life — call it under `mutation_lock()`.
+  It declines a doomed grant (no parked pair, no refresh token, deadline already
+  passed) instead of spending a request, and never touches a live credential.
 - **`resolve`** — which profile applies here. Default output is the wrapper
   porcelain `<name>\t<dir>\t<auto>`. **`--json`** is the single-call contract
   for display consumers (`claude-usage --show-profile` → the statusline):

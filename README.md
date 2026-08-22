@@ -54,10 +54,10 @@ the profile (that is where the transcripts are), a usage meter wants the account
   credits left on the table.
 - **Work and personal, cleanly split.** Separate config dirs auto-selected by
   directory — and serial accounts nest *inside* each, so both axes compose.
-- **Ages out loudly, not silently.** A launchd/systemd keep-alive daemon renews
-  parked refresh tokens for as long as the server will extend them, and says so
-  — log, `status`, and email — the moment it can't, so a re-login is a chore you
-  schedule rather than a surprise mid-task (per-account opt-out).
+- **Warns before it locks you out.** Refresh tokens expire on a fixed ~monthly
+  clock that nothing can extend, so `status` and every `claude` launch tell you
+  how long each account has left — and `auth` re-logs one in without disturbing
+  the account you're using.
 - **Invisible until you need it.** No config, or the default `~/.claude`? The
   wrapper is a byte-identical passthrough. `\claude` bypasses it entirely.
 - **Nothing to break, nothing to lose.** Secrets never hit argv; worst case
@@ -66,8 +66,7 @@ the profile (that is where the transcripts are), a usage meter wants the account
 > Works on **macOS and Linux**. The credential store is platform-specific:
 > the macOS login Keychain, or on Linux the `.credentials.json` files Claude
 > Code itself uses (live: `<dir>/.credentials.json`; parked: mode-0600 files
-> under the state dir). The keep-alive daemon is a launchd agent on macOS and
-> a systemd `--user` timer on Linux. Everything else is identical.
+> under the state dir). Everything else is identical.
 
 ## Install
 
@@ -131,20 +130,16 @@ reads it:
                                     // (~99% — Claude stops just before the cap)
     }
   },
-  "oauth": {                        // OPTIONAL — only for refresh/usage; see "OAuth constants"
+  "oauth": {                        // OPTIONAL — only for usage/anchor-window; see "OAuth constants"
     "client_id":  "<claude-code-oauth-client-id>",
     "token_url":  "<claude-code-token-endpoint-url>",
     "usage_url":  "<claude-code-usage-endpoint-url>",
     "user_agent": "<claude-code-user-agent>"
   },
-  "keepalive": {                    // OPTIONAL — per-account; omitted account = kept alive (true)
-    "max5x": false                  // don't auto-renew this account's refresh token
-  },
   "account_display": {              // OPTIONAL — each account's half of that label
     "max20x": "Max 20x",            // omitted account renders as its own key
     "max5x":  "Max 5x"
-  },
-  "notify_email": "you@example.com" // OPTIONAL — email via the system `sendmail` if keep-alive fails
+  }
 }
 ```
 
@@ -190,7 +185,7 @@ re-run `auth`, which rewrites both.
 
 ### OAuth constants
 
-The keep-alive `refresh` and per-account `usage` features talk to Claude
+The per-account `usage` and `anchor-window` features talk to Claude
 Code's OAuth endpoints, which require Claude Code's own OAuth **client id**,
 token/usage **URLs**, and **User-Agent**. Those identify the official client
 rather than this tool, so they are **not distributed here** — supply them per
@@ -200,8 +195,9 @@ environment variables, which take precedence). Read the values from your own
 Claude Code installation.
 
 Everything else works without them: profile routing and account swapping are
-fully functional; only `refresh`, `usage`, and exhaustion-based auto-rotation
-go inert, and they fail with a clear message rather than silently.
+fully functional; only `usage`, `anchor-window`, and exhaustion-based
+auto-rotation go inert, and they fail with a clear message rather than
+silently.
 
 ## Use
 
@@ -254,11 +250,6 @@ claude-profile resolve --json [--dir D] [--accounts]   the same question as JSON
 claude-profile anchor-window [--all|--profile P|--account A]   anchor a 5-hour
                                    window per account via one POST /v1/messages
                                    (serial-safe; no session/swap — see below)
-claude-profile keepalive [<account>] [on|off]  per-account keep-alive toggle (no args = report)
-claude-profile refresh [<name>] [--jitter N]   keep-alive: renew aging parked tokens
-claude-profile horizon [<name>]    refresh-deadline ledger: is keep-alive
-                                   actually gaining time, or is the chain capped?
-claude-profile daemon install [--jitter N]|uninstall|status   keep-alive daemon (launchd/systemd)
 claude-with <profile> [args]       one-shot launch against a profile
 claude-switch [<name>]             alias for `claude-profile use`
 claude-default                     one-shot launch with CLAUDE_CONFIG_DIR unset
@@ -312,93 +303,34 @@ the **refresh token**. A refresh grant always returns a *new* refresh token —
 but not necessarily a later deadline, and that distinction is the whole story:
 
 - **rolling** — the new token expires at `now + lifetime`, so every grant buys
-  back the time since the last one. Keep-alive does what it says.
+  back the time since the last one, and an account could in principle be kept
+  alive indefinitely without you.
 - **capped** — the server pins the entire token chain to one absolute instant.
   Every grant returns that same deadline and gains nothing, so the account
   lapses on that date however often it is refreshed. Only a fresh interactive
-  login (`claude-profile auth <name>`) opens a new window.
+  login opens a new window.
 
 Which behaviour you get is the server's call, not this tool's — and **every
-chain measured so far has been capped**: four of them, across two machines, both
+chain measured has been capped**: four of them, across two machines, both
 accounts, parked and live alike. The live account is the telling one. Its
 deadline sat within one second of itself across three samples over two days
 while Claude Code was busily refreshing it, so neither refreshing a chain nor
-*using* it buys any time. `rolling` stays documented because the tool must
-handle it and nothing promises the server keeps this policy, but nothing here
-has ever exhibited it.
+*using* it buys any time.
 
-**So plan on a periodic re-login** — on the order of a month, and per account
-*per machine*, since each host's chain carries its own independent deadline.
-What keep-alive buys is that tokens stay current inside the window, and that the
-deadline never arrives unannounced.
+The practical consequence is blunt: **there is no way to avoid a periodic
+re-login** — on the order of a month, and per account *per machine*, since each
+host's chain carries its own independent deadline. Rotating a refresh token
+achieves nothing you would notice; only `auth` does.
 
-Two lines of defence when one does age:
+> **Historical note.** This tool used to ship a keep-alive daemon that renewed
+> parked refresh tokens on a timer, on the premise that regular rotation would
+> hold a lapse off indefinitely. That premise was wrong — rotation moves the
+> token, never the deadline — so the daemon has been removed rather than left
+> in place doing ceremonial work. If you have one installed from an older
+> version, uninstall the launchd agent `com.claude-profile.refresh` or the
+> systemd `--user` timer `claude-profile-refresh`.
 
-**1. Keep-alive (`refresh` + daemon).** `claude-profile refresh` performs
-the same OAuth refresh grant Claude Code uses (client id + endpoint from your
-[OAuth config](#oauth-constants)) on parked accounts whose refresh token has
-fewer than 14 days left (`--min-days-left`), and re-parks the new pair. Safety
-ordering: live accounts are never touched (their tokens refresh
-themselves), the new pair is written **and read back** from the Keychain
-before success is declared, and a mutation lock serializes it against
-manual swaps. `claude-profile daemon install` registers a launchd agent
-running it daily (`daemon status` / `daemon uninstall` to inspect/remove).
-
-Because a capped grant still returns HTTP 200, every grant is judged on whether
-the deadline actually *moved*, not on whether it succeeded — otherwise the log
-reads `refreshed` each day while the account walks to its expiry. A grant that
-gains nothing is reported as a failure and emailed — and after that the gate
-stops granting on that chain at all, rather than burning one a day for the
-fortnight between the gate opening and the lapse. What is latched is the
-deadline itself, not a flag, so it self-heals: `auth` mints a chain with a new
-deadline, the latch stops matching, and keep-alive resumes unprompted.
-`--force` still goes through, so the swap-in path can always try to make a stale
-access token usable.
-
-Each run also samples every account's deadline read-only — including the live
-one, which no grant may touch — so `claude-profile horizon` shows whether a
-chain is gaining time or standing still:
-
-```
-claude-profile horizon
-max20x
-  2026-08-20T21:49:26+02:00  observed live   → 2026-09-19 13:17
-  2026-08-21T12:32:05+02:00  observed live   → 2026-09-19 13:17  +0 — did not move
-  2026-08-22T12:18:45+02:00  observed live   → 2026-09-19 13:17  +0 — did not move
-max5x  capped at 2026-08-21 23:07 since 2026-08-20 → claude-profile auth max5x
-  2026-08-19T12:24:47+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
-  2026-08-20T17:44:05+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
-  2026-08-21T12:32:05+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
-```
-
-An unchanged deadline is not re-recorded, so a gap between rows means the
-deadline sat still across those daily runs.
-
-Keep-alive is **per-account and opt-out**: every account is renewed by
-default, but `claude-profile keepalive <account> off` excludes one from the
-daemon (it then ages out on its own — `status` shows `keep-alive OFF` and
-still warns as it nears expiry). Turn it back on with `keepalive <account>
-on`; `claude-profile keepalive` with no args reports every account's state.
-An explicit `claude-profile refresh <account>` always runs regardless of the
-toggle — the switch only governs the unattended daemon sweep.
-
-`daemon install` registers the scheduler for your OS — a **launchd** agent on
-macOS, a **systemd `--user` timer** on Linux (with `loginctl enable-linger` so
-it runs while you're logged out). It fires daily at 12:17, but only ~once per
-14-day window does it actually make a network call. To keep that call off a
-predictable wall-clock beat, `refresh --jitter SECONDS` sleeps a random
-`0..SECONDS` **only when a grant is due** (no-op runs stay instant, before
-the lock so a concurrent swap isn't blocked). `daemon install [--jitter N]`
-bakes this in (default `3600` = grants land anywhere in a 1h window;
-`--jitter 0` to disable).
-
-If keep-alive ever cannot keep an account alive — a token aged out entirely,
-the endpoint rejected it, or the chain turned out to be capped — set
-`notify_email` in the config (or `$CLAUDE_PROFILE_NOTIFY_EMAIL`) and
-it will email you via the system `sendmail` — handy for the unattended daemon.
-
-**2. Warnings + painless re-auth.** If a token still ages out (machine off
-for weeks, revocation), you're warned in `status` **and at every `claude`
+You are warned before it bites, in `status` **and at every `claude`
 launch** of an auto profile (`⚠ refresh expires in Nd` / `refresh
 EXPIRED`). Fixing it does **not** require swapping the account live:
 
@@ -457,13 +389,13 @@ plan balance justifies firing, backoff, jitter, etc. belongs to the orchestrator
 > is that orchestrator. Pointed at this repo it discovers your accounts, applies
 > its window-check / balance-gate / circuit-breaker / cadence logic *per account*,
 > and delegates the actual anchor here — keeping **all** your subscriptions'
-> windows open continuously (parked included). Distinct from keep-alive (below):
-> keep-alive renews multi-day **refresh tokens** so accounts don't die;
-> anchor-window opens the **5-hour usage window**. Complementary.
+> windows open continuously (parked included). Note this is the **5-hour usage
+> window**, unrelated to the multi-day refresh-token deadline discussed above —
+> anchoring a window does nothing to postpone a re-login.
 
 `--model` sets the concrete API model id (default a cheap Haiku id — the CLI
 `haiku` *alias* is not valid on the API); config `oauth.messages_url` /
-`CLAUDE_PROFILE_MESSAGES_URL` overrides the endpoint. Like usage/refresh it needs
+`CLAUDE_PROFILE_MESSAGES_URL` overrides the endpoint. Like `usage` it needs
 the [OAuth constants](#oauth-constants) (the User-Agent especially — Cloudflare
 rejects the default). **This is an unofficial spoof, not a supported API
 surface**, and could change; the orchestrator degrades gracefully if it starts
@@ -537,7 +469,7 @@ Nothing else in the config dir is account-bound. A swap:
    `auth` flow inline and then continues. This runs **before** the live-session
    guard below, deliberately: `auth` works in a scratch dir and needs no
    sessions closed, so the fixable half of the problem gets fixed even when the
-   swap itself is still blocked. Non-interactive runs (scripts, the daemon)
+   swap itself is still blocked. Non-interactive runs (scripts, cron)
    print the exact `claude-profile auth <name>` line and exit,
 1. **refuses if live sessions** are running out of the dir (session registry
    + pid liveness) — swapping under a running process risks the old session
@@ -638,7 +570,7 @@ Details of the harness are in [`test/README.md`](test/README.md).
 **Python core** — pure-stdlib `unittest`, no network and no real Keychain (both
 stubbed), so it runs the same on macOS, Linux, and CI; the Linux file backend is
 exercised directly (`IS_MACOS` forced false). Covers the credential store (file
-backend, 0600, round-trips, listing), the refresh gate, exhaustion +
+backend, 0600, round-trips, listing), the on-demand parked grant, exhaustion +
 `exhaust_credits` rotation, `toggle` selection, the live-session guard/`--force`,
 OAuth-constant resolution, path resolution, and the Linux `security`-absent
 degrade.
