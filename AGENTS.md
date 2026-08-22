@@ -103,7 +103,11 @@ python3 stdlib):
   HTTP 200**: the server may either roll the refresh token (new deadline =
   now + lifetime) or cap the whole chain at one absolute instant, and under a
   cap every grant returns that same date, so keep-alive cannot work at all and
-  only `auth` opens a new window. `horizon_advanced()` classifies it
+  only `auth` opens a new window. **Every chain measured so far is capped** —
+  four across two hosts, parked and live — including a live one whose deadline
+  held to within a second over two days of Claude Code refreshing it, so being
+  in use does not re-anchor a window either. Treat `rolling` as a branch the
+  code must handle, not as observed behaviour. `horizon_advanced()` classifies it
   (`HORIZON_SLACK` apart, since a capped chain still drifts by seconds per
   grant); a stall is escalated as a failure once per stall
   (`HORIZON_STALLED_MARK`, notify-worthy) and reported quietly on later sweeps
