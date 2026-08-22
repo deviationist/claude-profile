@@ -347,20 +347,28 @@ running it daily (`daemon status` / `daemon uninstall` to inspect/remove).
 Because a capped grant still returns HTTP 200, every grant is judged on whether
 the deadline actually *moved*, not on whether it succeeded — otherwise the log
 reads `refreshed` each day while the account walks to its expiry. A grant that
-gains nothing is reported as a failure (and emailed, once per stall rather than
-once per day); later sweeps say `still capped at <date>` quietly. Each run also
-samples every account's deadline read-only — including the live one, which no
-grant may touch — so `claude-profile horizon` can show whether a chain is
-rolling forward or standing still:
+gains nothing is reported as a failure and emailed — and after that the gate
+stops granting on that chain at all, rather than burning one a day for the
+fortnight between the gate opening and the lapse. What is latched is the
+deadline itself, not a flag, so it self-heals: `auth` mints a chain with a new
+deadline, the latch stops matching, and keep-alive resumes unprompted.
+`--force` still goes through, so the swap-in path can always try to make a stale
+access token usable.
+
+Each run also samples every account's deadline read-only — including the live
+one, which no grant may touch — so `claude-profile horizon` shows whether a
+chain is gaining time or standing still:
 
 ```
 claude-profile horizon
 max20x
-  2026-08-20T13:17:02+02:00  observed live   → 2026-09-19 13:17  +30.00d
-max5x     capped at 2026-08-21 23:07 since 2026-08-08 → claude-profile auth max5x
-  2026-08-08T12:22:51+02:00  grant    parked → 2026-08-21 23:07
-  2026-08-09T12:18:54+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
+  2026-08-20T21:49:26+02:00  observed live   → 2026-09-19 13:17
+  2026-08-21T12:32:05+02:00  observed live   → 2026-09-19 13:17  +0 — did not move
+  2026-08-22T12:18:45+02:00  observed live   → 2026-09-19 13:17  +0 — did not move
+max5x  capped at 2026-08-21 23:07 since 2026-08-20 → claude-profile auth max5x
+  2026-08-19T12:24:47+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
   2026-08-20T17:44:05+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
+  2026-08-21T12:32:05+02:00  grant    parked → 2026-08-21 23:07  +0 — did not move
 ```
 
 An unchanged deadline is not re-recorded, so a gap between rows means the
