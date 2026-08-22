@@ -388,10 +388,13 @@ class RefreshGate(unittest.TestCase):
     def setUp(self):
         self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["a", "b"]}}}
         self._caf, self._rpc = cp.current_account_of, cp.read_parked_cred
+        self._ls = cp.load_snapshot
         cp.current_account_of = lambda cfg, prof: "a"  # "a" is the live account
+        cp.load_snapshot = lambda n: {}                # no cap latched by default
 
     def tearDown(self):
         cp.current_account_of, cp.read_parked_cred = self._caf, self._rpc
+        cp.load_snapshot = self._ls
 
     def test_live_account_skipped(self):
         act, _b, _o, reason = cp.refresh_gate(self.cfg, "a", 14, False)
@@ -427,6 +430,46 @@ class RefreshGate(unittest.TestCase):
         act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
         self.assertFalse(act)
         self.assertIn("no parked", reason)
+
+    def _capped(self, days_left=5):
+        """A parked blob plus a latch recording that its deadline is capped."""
+        blob = oauth_blob(days_left=days_left)
+        rexp = json.loads(blob)["claudeAiOauth"]["refreshTokenExpiresAt"]
+        cp.read_parked_cred = lambda n: blob
+        cp.load_snapshot = lambda n: {"horizonStalledExp": rexp}
+        return rexp
+
+    def test_capped_chain_stops_burning_grants(self):
+        self._capped()
+        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
+        self.assertFalse(act)
+        self.assertIn("capped", reason)
+        self.assertIn("auth b", reason)
+
+    def test_force_still_grants_on_a_capped_chain(self):
+        """The swap-in path forces a grant to make a stale access token usable —
+        a capped refresh deadline must not block that."""
+        self._capped()
+        act, *_ = cp.refresh_gate(self.cfg, "b", 14, True)
+        self.assertTrue(act)
+
+    def test_latch_from_a_previous_chain_does_not_stick(self):
+        """`auth` mints a chain with a new deadline; the stale latch must stop
+        matching so keep-alive resumes on its own."""
+        self._capped()
+        stale = cp.load_snapshot("b")["horizonStalledExp"]
+        cp.read_parked_cred = lambda n: oauth_blob(days_left=10)   # re-authed
+        cp.load_snapshot = lambda n: {"horizonStalledExp": stale}
+        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
+        self.assertTrue(act)
+        self.assertIsNone(reason)
+
+    def test_expired_beats_capped(self):
+        """An already-dead token reports as expired, not merely capped."""
+        self._capped(days_left=-1)
+        act, _b, _o, reason = cp.refresh_gate(self.cfg, "b", 14, False)
+        self.assertFalse(act)
+        self.assertIn("EXPIRED", reason)
 
 
 # ── refresh-deadline ledger (can keep-alive actually gain time?) ────────────
