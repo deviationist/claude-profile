@@ -1214,6 +1214,19 @@ def refresh_gate(cfg, name, min_days_left, force):
     rexp = oauth.get("refreshTokenExpiresAt")
     if rexp and rexp / 1000 <= time.time():
         return False, blob, oauth, f"{name}: refresh token already EXPIRED — run `claude-profile auth {name}`"
+    # Known-capped chain: a grant here provably buys nothing (that is what the
+    # latch records), so stop making one every day for the ~2 weeks between the
+    # gate opening and the lapse. Latched against the *deadline*, not a flag, so
+    # it self-heals: `auth` mints a chain with a new deadline, this stops
+    # matching, and grants resume on their own. --force still goes through, so
+    # the swap-in path can always try to make a stale access token usable.
+    if not force and rexp:
+        capped = (load_snapshot(name) or {}).get("horizonStalledExp")
+        if capped and abs(capped - rexp) / 1000 <= HORIZON_SLACK:
+            day = datetime.datetime.fromtimestamp(rexp / 1000).astimezone().strftime("%Y-%m-%d")
+            return False, blob, oauth, (
+                f"{name}: capped at {day} — grants gain nothing here; "
+                f"run `claude-profile auth {name}`")
     if not force and rexp and (rexp / 1000 - time.time()) > min_days_left * 86400:
         days = (rexp / 1000 - time.time()) / 86400
         return False, blob, oauth, f"{name}: fresh ({days:.0f}d left) — nothing to do"
