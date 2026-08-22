@@ -318,11 +318,19 @@ but not necessarily a later deadline, and that distinction is the whole story:
   lapses on that date however often it is refreshed. Only a fresh interactive
   login (`claude-profile auth <name>`) opens a new window.
 
-Which behaviour you get is the server's call, not this tool's, and it has been
-observed to differ between accounts on the same machine. **So plan on a periodic
-re-login** — on the order of a month per account — rather than expecting
-keep-alive to abolish it. What keep-alive buys is that the deadline is renewed
-whenever it can be, and never arrives unannounced when it can't.
+Which behaviour you get is the server's call, not this tool's — and **every
+chain measured so far has been capped**: four of them, across two machines, both
+accounts, parked and live alike. The live account is the telling one. Its
+deadline sat within one second of itself across three samples over two days
+while Claude Code was busily refreshing it, so neither refreshing a chain nor
+*using* it buys any time. `rolling` stays documented because the tool must
+handle it and nothing promises the server keeps this policy, but nothing here
+has ever exhibited it.
+
+**So plan on a periodic re-login** — on the order of a month, and per account
+*per machine*, since each host's chain carries its own independent deadline.
+What keep-alive buys is that tokens stay current inside the window, and that the
+deadline never arrives unannounced.
 
 Two lines of defence when one does age:
 
