@@ -48,6 +48,20 @@ def ns(**kw):
     return types.SimpleNamespace(**kw)
 
 
+def setUpModule():
+    """No test may reach the network. Any code path that tries to exchange a
+    refresh token without stubbing the grant first fails loudly here instead of
+    quietly firing an HTTP request at Anthropic with a junk token — which is
+    exactly what a `refresh_*_access` call on an unstubbed fixture would do,
+    since the fixtures carry deliberately-valid refresh tokens."""
+    def _no_network(_rt):
+        raise AssertionError(
+            "oauth_refresh_grant() called without a stub — a test reached the "
+            "network. Stub it (or the refresh_*_access helper) in setUp."
+        )
+    cp.oauth_refresh_grant = _no_network
+
+
 def oauth_blob(days_left=30, refresh="r", access="a"):
     """A credential blob with a refresh token expiring `days_left` from now."""
     exp = int((cp.time.time() + days_left * 86400) * 1000)
@@ -749,6 +763,83 @@ class RefreshParkedAccess(unittest.TestCase):
         self.assertFalse(cp.refresh_parked_access("b"))
 
 
+class RefreshLiveAccess(unittest.TestCase):
+    """Refreshing the *live* credential. Safe only because it refuses while a
+    session is running: a live Claude Code process holds the pair in memory and
+    rewrites the file on its own refresh, so a concurrent grant can orphan a
+    rotated refresh token."""
+
+    def setUp(self):
+        self.cfg = {"profiles": {"p": {"dir": "~/.claude"}}}
+        self.live = {}
+        self.parked = {}
+        self.sessions = []
+        self._orig = {n: getattr(cp, n) for n in
+                      ("read_live_cred", "write_live_cred", "read_parked_cred",
+                       "write_parked_cred", "live_sessions", "profile_dir",
+                       "oauth_refresh_grant")}
+        cp.profile_dir = lambda cfg, prof: "/x"
+        cp.read_live_cred = lambda d: self.live.get(d)
+        cp.write_live_cred = lambda d, blob: self.live.__setitem__(d, blob)
+        cp.read_parked_cred = lambda n: self.parked.get(n)
+        cp.write_parked_cred = lambda n, blob: self.parked.__setitem__(n, blob)
+        cp.live_sessions = lambda d: self.sessions
+        self.grants = []
+        cp.oauth_refresh_grant = self._grant
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(cp, n, v)
+
+    def _grant(self, rt):
+        self.grants.append(rt)
+        return {"access_token": "FRESH", "expires_in": 28800,
+                "refresh_token": "r2", "refresh_token_expires_in": 30 * 86400}
+
+    def test_refreshes_when_no_session_is_running(self):
+        self.live["/x"] = expired_blob()
+        self.assertTrue(cp.refresh_live_access(self.cfg, "p"))
+        self.assertEqual(cp.token_from_blob(self.live["/x"]), "FRESH")
+
+    def test_refuses_while_a_session_is_running(self):
+        """The invariant that makes this safe at all."""
+        before = expired_blob()
+        self.live["/x"] = before
+        self.sessions = [{"pid": 123}]
+        self.assertFalse(cp.refresh_live_access(self.cfg, "p"))
+        self.assertEqual(self.live["/x"], before)          # untouched
+        self.assertEqual(self.grants, [])                  # no request spent
+
+    def test_never_writes_the_parked_store(self):
+        self.live["/x"] = expired_blob()
+        self.parked["acct"] = "PARKED-UNTOUCHED"
+        cp.refresh_live_access(self.cfg, "p")
+        self.assertEqual(self.parked, {"acct": "PARKED-UNTOUCHED"})
+
+    def test_no_live_credential_declines(self):
+        self.assertFalse(cp.refresh_live_access(self.cfg, "p"))
+        self.assertEqual(self.grants, [])
+
+    def test_dead_refresh_token_declines_without_a_grant(self):
+        self.live["/x"] = oauth_blob(days_left=-1)
+        self.assertFalse(cp.refresh_live_access(self.cfg, "p"))
+        self.assertEqual(self.grants, [])
+
+    def test_grant_failure_leaves_the_credential_untouched(self):
+        before = expired_blob()
+        self.live["/x"] = before
+        def boom(rt):
+            raise RuntimeError("HTTP 400")
+        cp.oauth_refresh_grant = boom
+        self.assertFalse(cp.refresh_live_access(self.cfg, "p"))
+        self.assertEqual(self.live["/x"], before)
+
+    def test_readback_mismatch_is_not_success(self):
+        self.live["/x"] = expired_blob()
+        cp.write_live_cred = lambda d, blob: None          # silently drops the write
+        self.assertFalse(cp.refresh_live_access(self.cfg, "p"))
+
+
 class AccountUsageRaw(unittest.TestCase):
     def setUp(self):
         self.cfg = {"profiles": {"p": {"dir": "~/.claude", "accounts": ["live", "parked"]}}}
@@ -756,7 +847,8 @@ class AccountUsageRaw(unittest.TestCase):
         cp.STATE_DIR = tempfile.mkdtemp()                  # isolate the raw-usage cache
         self._orig = {n: getattr(cp, n) for n in
                       ("current_account_of", "read_live_cred", "read_parked_cred",
-                       "fetch_usage", "refresh_parked_access", "mutation_lock", "profile_dir")}
+                       "fetch_usage", "refresh_parked_access", "refresh_live_access",
+                       "mutation_lock", "profile_dir")}
         cp.current_account_of = lambda cfg, prof: "live"   # "live" is live, "parked" isn't
         cp.profile_dir = lambda cfg, prof: "/x"
         cp.fetch_usage = lambda tok: {"ok": tok}           # echo the token actually used
@@ -791,13 +883,24 @@ class AccountUsageRaw(unittest.TestCase):
         cp.refresh_parked_access = lambda *a, **k: None
         self.assertIsNone(cp.account_usage_raw(self.cfg, "parked"))
 
-    def test_live_expired_returns_none_never_refreshes(self):
-        cp.read_live_cred = lambda d: expired_blob()
+    def test_live_expired_refreshes_via_the_live_path(self):
+        """A live account with a lapsed access token is refreshed from the
+        profile's own store — not the parked one, which may be an older
+        snapshot of a chain that has since rotated."""
+        st = {"blob": expired_blob()}
+        cp.read_live_cred = lambda d: st["blob"]
         cp.read_parked_cred = lambda n: None
-        seen = {"refresh": 0}
-        cp.refresh_parked_access = lambda *a, **k: seen.__setitem__("refresh", seen["refresh"] + 1)
+        seen = {"parked": 0}
+        cp.refresh_parked_access = lambda *a, **k: seen.__setitem__("parked", seen["parked"] + 1)
+        cp.refresh_live_access = lambda cfg, prof: st.__setitem__("blob", oauth_blob(access="FRESH"))
+        self.assertEqual(cp.account_usage_raw(self.cfg, "live"), {"ok": "FRESH"})
+        self.assertEqual(seen["parked"], 0)                # never the parked store
+
+    def test_live_refresh_declining_returns_none(self):
+        cp.read_live_cred = lambda d: expired_blob()       # stays expired (e.g. session running)
+        cp.read_parked_cred = lambda n: None
+        cp.refresh_live_access = lambda cfg, prof: False
         self.assertIsNone(cp.account_usage_raw(self.cfg, "live"))
-        self.assertEqual(seen["refresh"], 0)               # invariant: live creds untouched
 
     def test_stale_cache_served_on_fetch_failure(self):
         # 1st call succeeds and populates the cache.
