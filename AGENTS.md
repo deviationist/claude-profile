@@ -61,12 +61,9 @@ python3 stdlib):
   `rotate [--if-exhausted] [--dry-run]`, `auto on|off`, `usage [--fresh]`,
   `usage-json [--all|--profile P|--account A]` (porcelain for
   `claude-usage --all`: emits `<account>\t<compact-raw-usage-json>` per line,
-  empty field = unavailable; `account_usage_raw()` refreshes an expired *parked*
-  access token in place first — under the mutation lock, via
-  `refresh_parked_access()` —
-  so parked accounts stay renderable; **never touches a live credential**, so a
-  live account with an idle-expired token comes back empty until Claude Code
-  refreshes it).
+  empty field = unavailable; `account_usage_raw()` refreshes an expired access
+  token in place first — under the mutation lock, via `refresh_parked_access()`
+  or `refresh_live_access()` — so accounts stay renderable).
   `anchor-window [--all|--profile P|--account A] [--model ID] [--prompt T]
   [--max-tokens N]` anchors a 5-hour usage window per account by firing ONE
   POST /v1/messages with that account's token (Claude Code identity spoof +
@@ -101,13 +98,24 @@ python3 stdlib):
   launchd agent and a systemd `--user` timer) used to exist on the premise that
   rotation held the deadline off; it was removed once measurement disproved
   that. Do not reintroduce it without evidence of a *rolling* chain.
-  `refresh_parked_access()` is what survives: a single on-demand grant that
-  mints a fresh **access** token for a parked account and re-parks the pair
-  (write + read-back verify, so a new refresh token is never left only in
-  memory). It exists solely so `usage-json` and `anchor-window` can use a parked
-  account past the 8-hour access-token life — call it under `mutation_lock()`.
-  It declines a doomed grant (no parked pair, no refresh token, deadline already
-  passed) instead of spending a request, and never touches a live credential.
+What survives is the on-demand *access*-token grant: `_regrant_blob()` does
+  the exchange, `refresh_parked_access(name)` and `refresh_live_access(cfg,
+  profile)` write it back to the parked store and the profile's own store
+  respectively (write + read-back verify, so a rotated refresh token is never
+  left only in memory). They exist solely so `usage-json` and `anchor-window`
+  can use an account past the 8-hour access-token life — call under
+  `mutation_lock()`. Both decline a doomed grant (no credential, no refresh
+  token, deadline already passed) instead of spending a request.
+  **`refresh_live_access()` additionally refuses while `live_sessions()` is
+  non-empty** — a running Claude Code owns that credential, holds the pair in
+  memory and rewrites the file on its own refresh, so a concurrent grant can
+  orphan a rotated refresh token. That guard is the only reason touching a live
+  credential is safe at all; do not relax it. It matters on hosts where Claude
+  Code seldom runs (a server anchoring windows on a timer), where the live
+  token would otherwise lapse after 8 hours and stay lapsed.
+  The test suite installs a `setUpModule` guard that makes any unstubbed
+  `oauth_refresh_grant()` call fail loudly, since the fixtures carry valid
+  refresh tokens and would otherwise fire real HTTP requests.
 - **`resolve`** — which profile applies here. Default output is the wrapper
   porcelain `<name>\t<dir>\t<auto>`. **`--json`** is the single-call contract
   for display consumers (`claude-usage --show-profile` → the statusline):

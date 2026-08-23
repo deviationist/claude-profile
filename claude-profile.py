@@ -926,34 +926,30 @@ def _raw_usage_cache_path(name):
     return os.path.join(STATE_DIR, "usage-raw", f"{name}.json")
 
 
-def refresh_parked_access(name):
-    """Mint a fresh *access* token for a parked account and re-park the pair.
+def _regrant_blob(blob):
+    """Exchange a credential blob's refresh token for a fresh access token and
+    return the updated blob, or None if the grant should not or could not be
+    made.
 
-    Not a keep-alive: nothing here extends the refresh token's deadline, which
-    the server pins at interactive login and no grant can move. This exists
-    only so features that need a parked account's token on demand —
-    `usage-json` rendering a parked seat, `anchor-window` anchoring one — are
-    not blocked by the 8-hour access-token life. Call it under the mutation
-    lock. Returns True if a usable pair was re-parked.
+    Nothing here extends the refresh token's deadline — the server pins that at
+    interactive login and no grant moves it (see "Re-authenticating a parked
+    account" in the README). This only defeats the 8-hour *access* token life.
 
-    Declines a doomed grant (no parked pair, no refresh token, or a refresh
-    token already past its deadline) rather than spending a request on it, and
-    never touches a live credential — Claude Code owns that one."""
-    blob = read_parked_cred(name)
-    if blob is None:
-        return False
+    Declines rather than spending a request when there is no refresh token, or
+    when its deadline has already passed: that chain is dead and only `auth`
+    can replace it."""
     try:
         oauth = json.loads(blob).get("claudeAiOauth") or {}
-    except json.JSONDecodeError:
-        return False
+    except (json.JSONDecodeError, AttributeError):
+        return None
     rt = oauth.get("refreshToken")
     rexp = oauth.get("refreshTokenExpiresAt")
     if not rt or (rexp and rexp / 1000 <= time.time()):
-        return False
+        return None
     try:
         resp = oauth_refresh_grant(rt)
     except RuntimeError:
-        return False
+        return None
 
     now_ms = int(time.time() * 1000)
     new_oauth = dict(oauth)
@@ -966,21 +962,67 @@ def refresh_parked_access(name):
             new_oauth["refreshTokenExpiresAt"] = (
                 now_ms + int(resp["refresh_token_expires_in"]) * 1000
             )
-    new_blob = json.dumps({**json.loads(blob), "claudeAiOauth": new_oauth})
-    # write + read-back verify — a new refresh token must never exist only in
-    # memory, or the parked pair is silently orphaned
+    return json.dumps({**json.loads(blob), "claudeAiOauth": new_oauth})
+
+
+def refresh_parked_access(name):
+    """Mint a fresh access token for a *parked* account and re-park the pair.
+
+    Not a keep-alive: it exists so features needing a parked account's token on
+    demand — `usage-json` rendering a parked seat, `anchor-window` anchoring one
+    — are not blocked by the 8-hour access-token life. Call it under the
+    mutation lock. Returns True if a usable pair was re-parked."""
+    blob = read_parked_cred(name)
+    if blob is None:
+        return False
+    new_blob = _regrant_blob(blob)
+    if new_blob is None:
+        return False
+    # write + read-back verify — a rotated refresh token must never exist only
+    # in memory, or the pair is silently orphaned
     write_parked_cred(name, new_blob)
     return read_parked_cred(name) == new_blob
 
 
+def refresh_live_access(cfg, profile):
+    """Mint a fresh access token for the account that is *live* in `profile`,
+    writing it back to the profile's own credential store.
+
+    Claude Code normally owns this credential and refreshes it in-process, so
+    this is a no-op on a workstation. It matters on a host where Claude Code
+    rarely runs — a server anchoring windows on a timer — because there the
+    live access token simply lapses after 8 hours and stays lapsed, leaving
+    `anchor-window` and `usage-json` with nothing usable for the very account
+    the profile is pointed at.
+
+    **Refuses while any session is running out of that dir.** A live Claude
+    Code process holds the old pair in memory and rewrites the file on its own
+    refresh, so a concurrent grant risks the two clobbering each other and
+    orphaning a rotated refresh token. That is the same hazard the swap guard
+    exists for, so it reuses the same check. Call under the mutation lock.
+    Returns True if a usable pair was written."""
+    d = profile_dir(cfg, profile)
+    if live_sessions(d):
+        return False
+    blob = read_live_cred(d)
+    if blob is None:
+        return False
+    new_blob = _regrant_blob(blob)
+    if new_blob is None:
+        return False
+    write_live_cred(d, new_blob)
+    return read_live_cred(d) == new_blob
+
+
 def account_access_token(cfg, name, refresh_if_expired=True):
     """A usable *access* token for one account (live or parked), plus whether it
-    is the live account. The live account reads the live credential (Claude
-    Code's to refresh — never touched here); a parked account reads its parked
-    pair, and an expired parked access token is refreshed in place first under
-    the mutation lock. Returns (token|None,
-    is_live:bool) — None means unavailable (offline, a dead refresh token, or a
-    live account whose token lapsed between Claude Code sessions)."""
+    is the live account. An expired access token is refreshed in place first,
+    under the mutation lock: a parked account from its parked pair, the live
+    account from the profile's own store — the latter only when no session is
+    running out of that dir, since Claude Code owns that credential while it
+    is up. Returns (token|None, is_live:bool) — None means unavailable
+    (offline, a dead refresh token, or a live account with a session running
+    and a token that lapsed under it)."""
     profile = next(
         (p for p in cfg["profiles"] if name in profile_accounts(cfg, p)), None
     )
@@ -989,13 +1031,16 @@ def account_access_token(cfg, name, refresh_if_expired=True):
     if blob is None:
         blob = read_parked_cred(name)
     token = token_from_blob(blob) if blob else None
-    if token is None and not live and refresh_if_expired:
-        # Parked + expired access token → refresh in place, then re-read.
-        # refresh_parked_access declines a doomed grant and never touches a
-        # live account.
+    if token is None and refresh_if_expired:
+        # Expired access token → refresh in place, then re-read. Both helpers
+        # decline a doomed grant; the live one also declines while a session is
+        # running, so a live Claude Code process is never raced.
         with mutation_lock():
-            refresh_parked_access(name)
-        blob = read_parked_cred(name)
+            if live:
+                refresh_live_access(cfg, profile)
+            else:
+                refresh_parked_access(name)
+        blob = read_live_cred(profile_dir(cfg, profile)) if live else read_parked_cred(name)
         token = token_from_blob(blob) if blob else None
     return token, live
 
