@@ -104,8 +104,8 @@ filtering. The fallback nudges you once per shell that fzf exists; set
 
 **[`claude-usage`](https://github.com/deviationist/claude-usage)** — statusline
 integration, auto-routed per profile; its `--all` renders a themed usage bar for
-**every** account here via the `usage-json` porcelain, which refreshes parked
-tokens so their usage stays visible.
+**every** account here via the `usage-json` porcelain, which refreshes lapsed
+access tokens so their usage stays visible.
 
 ## Configure
 
@@ -365,9 +365,19 @@ you can't rotate under a live session.
 given account's own token (spoofing the Claude Code identity so the subscription
 token is accepted), anchoring that account's window **without a session and
 without a swap**. Because claude-profile is the one component that can safely mint
-a fresh token for any account — live *or* parked, refreshing an expired parked
-token in place under the mutation lock — this lives here, and **the token never
+a fresh token for any account — live *or* parked, refreshing an expired one in
+place under the mutation lock — this lives here, and **the token never
 leaves the process** (it rides on stdin to `curl`, never argv/disk).
+
+> Access tokens last 8 hours, so on a host where Claude Code seldom runs the
+> *live* account's token lapses and stays lapsed — leaving nothing to anchor
+> with for the very account the profile points at. claude-profile therefore
+> refreshes a live credential too, but **only while no session is running out
+> of that dir** (the same guard `account` uses): a running Claude Code holds
+> the pair in memory and rewrites the file on its own refresh, so a concurrent
+> grant could orphan a rotated refresh token. Parked accounts have no such
+> constraint. Neither case extends the refresh-token deadline — nothing
+> does.
 
 ```sh
 claude-profile anchor-window --all          # anchor every account, every profile
