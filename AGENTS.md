@@ -128,7 +128,7 @@ What survives is the on-demand *access*-token grant: `_regrant_blob()` does
   verbatim downstream: `display` / `account_display` from config, no
   title-casing heuristics, and each half included only when it disambiguates
   (profile named only if >1 profile exists, account only if the profile is
-  serial; neither → **empty label**, a valid answer rather than a failure), so a
+  serial or `always_label` is true; neither → **empty label**, a valid answer rather than a failure), so a
   single-profile host renders `Max 20x` rather than `personal (max20x)`, and a
   one-profile-one-account host renders nothing at all. `{"schema":1,"active":false}` at exit 0 = no config / unclaimed dir —
   an ordinary outcome, not an error. Invariants: **never touch the Keychain**

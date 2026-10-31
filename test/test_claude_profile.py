@@ -242,6 +242,17 @@ class DisplayLabels(unittest.TestCase):
         self.assertEqual(cp.compose_label(solo, "personal", "only"), "")
         self.assertEqual(cp.compose_label(solo, "personal", None), "")
 
+    def test_always_label_names_a_lone_account(self):
+        solo = {"profiles": {"personal": {"dir": "~/.claude", "accounts": ["max20x"]}},
+                "account_display": {"max20x": "Ultra"}, "always_label": True}
+        self.assertEqual(cp.compose_label(solo, "personal", "max20x"), "Ultra")
+        # still nothing to say when the live account is unknown
+        self.assertEqual(cp.compose_label(solo, "personal", None), "")
+        # the profile half keeps its own rule: named only when >1 profile
+        duo = dict(solo, profiles={**solo["profiles"],
+                   "work": {"dir": "~/.claude-work", "accounts": ["w"]}})
+        self.assertEqual(cp.compose_label(duo, "personal", "max20x"), "personal (Ultra)")
+
 
 class ResolveJson(unittest.TestCase):
     def setUp(self):
