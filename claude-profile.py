@@ -347,8 +347,13 @@ def compose_label(cfg, profile, account):
     ever be that seat, so a label there is decoration in a status line's
     scarcest resource. Consumers treat "" as "render nothing" — it is a valid
     answer, not a failure (`active` stays true).
+
+    Top-level `"always_label": true` opts out of that for the account half: it
+    is named even when the profile holds one account, so a single-seat host
+    still says which plan it's burning ("Ultra").
     """
-    a = account_display(cfg, account) if (account and is_serial(cfg, profile)) else None
+    named = is_serial(cfg, profile) or cfg.get("always_label") is True
+    a = account_display(cfg, account) if (account and named) else None
     p = profile_display(cfg, profile) if len(cfg.get("profiles") or {}) > 1 else None
     if p and a:
         return f"{p} ({a})"

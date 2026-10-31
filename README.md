@@ -139,7 +139,9 @@ reads it:
   "account_display": {              // OPTIONAL — each account's half of that label
     "max20x": "Max 20x",            // omitted account renders as its own key
     "max5x":  "Max 5x"
-  }
+  },
+  "always_label": false             // OPTIONAL — true: name the account even when
+                                    // the profile holds only one (see "Seat labels")
 }
 ```
 
@@ -445,7 +447,9 @@ naming rules live here, and they're configured, never derived:
   The single-profile host is the case this exists for: `personal (max20x)`
   there would spend most of its width on a constant. And one profile holding
   one subscription can only ever be that seat, so the label is empty — a valid
-  answer (`active` stays true), which consumers render as nothing.
+  answer (`active` stays true), which consumers render as nothing. Set
+  top-level `"always_label": true` to name the account anyway — useful when the
+  plan itself is worth seeing (`Ultra` on a single-seat host).
 
 `--dir` is a **reverse lookup** (which profile owns this config dir?) and is
 the right question for a statusline: it knows the dir a session belongs to,
