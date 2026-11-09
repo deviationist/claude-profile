@@ -125,6 +125,22 @@ Open questions: whether a pending marker should also be honored by an explicit
 `claude-profile rotate` (probably yes) vs. only the launch path; interaction with
 `--force` (force should just clear any marker after swapping).
 
+## Transcript retention is per-profile, so dormant profiles never get cleaned
+
+Claude Code applies `cleanupPeriodDays` (default 30) at **startup, to the config
+dir it was launched with**. Because the wrapper resolves one dir per launch, a
+profile that stops matching a path rule stops being cleaned — and keeps its
+transcripts indefinitely. Measured 2026-10-09: `~/.claude` held 61 transcripts
+(25.7 MB), *all* older than 30 days, none deleted, because every launch for six
+weeks resolved to `personal`. The gap is inverted — the least-used profile
+retains the most.
+
+claude-profile owns this because `config.json` holds the only complete list of
+profile dirs; Claude Code cannot clean a dir it is never started with.
+
+Full analysis, measurements, the lossy-dir-name trap, a proposed `sweep` surface,
+and a cheap interim workaround: **[RETENTION.md](RETENTION.md)**.
+
 ## Done
 
 - **Linux credential backend** — serial accounts / keep-alive work on Linux
