@@ -216,6 +216,30 @@ When the resolved dir is `~/.claude` the wrapper sets nothing — behavior is
 byte-identical to the bare binary (and with no config file the wrapper is a
 transparent passthrough everywhere). `\claude` bypasses it entirely.
 
+### Keeping a profile out of a directory (`CLAUDE_FORBID_DIRS`)
+
+Opt-in, off by default. Set it in the gitignored `.env` next to
+`claude-profile.zsh` (see `.env.example`); an exported shell variable of the
+same name is ignored:
+
+```sh
+CLAUDE_FORBID_DIRS="$HOME/.claude-personal:$HOME/work"
+```
+
+Space-separated `<config-dir>:<forbidden-dir>` pairs. When the profile being
+launched resolves to `<config-dir>`, the launch is refused (exit 1, before
+`claude` starts) if the working directory, or any argument that is an existing
+path (e.g. `--add-dir`), lies inside `<forbidden-dir>`. Paths are compared
+physically, so a symlink into the directory is caught. Other profiles launch
+there as usual.
+
+The check sits in `_claude_exec`, so it covers every route that resolves to the
+listed profile: path rules, the `use` toggle, `claude-with` and a caller-set
+`CLAUDE_CONFIG_DIR`. It doesn't cover `\claude` / `command claude`, launches
+outside this shell (the desktop app, IDE extensions), or what a running session
+does afterwards. Pair it with that profile's own permission deny rules if you
+need those covered too.
+
 ### CLI
 
 Leave the name off any of the selection commands and you get a picker over
@@ -592,7 +616,8 @@ degrade.
 **Zsh layer** (`bats`, needs `zsh`; `fzf` optional) — the selector screen in both
 of its branches (fzf headlessly via `--select-1`; the numbered fallback driven
 through a real pty, since it reads `/dev/tty`), and the `claude` wrapper's
-resolution order, passthrough invariant, and selector argv-shaping. `claude`
+resolution order, passthrough invariant, selector argv-shaping, and the
+`CLAUDE_FORBID_DIRS` launch guard. `claude`
 itself is a stub on `PATH` that reports the config dir it inherited. Includes the
 **ccfind contract**: ccfind resumes as `CLAUDE_CONFIG_DIR=<dir> claude --resume
 <id>`, so a caller-set dir must be honored verbatim — ccfind tests the emitting

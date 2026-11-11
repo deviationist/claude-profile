@@ -32,7 +32,9 @@ python3 stdlib):
   passthrough — `CLAUDE_CONFIG_DIR` never set. With `auto: true` + >1
   accounts it runs `rotate --if-exhausted` first (never blocks a launch;
   never swaps under live sessions). macOS launches run under `caffeinate`
-  (knobs in `./.env`). Bypass: `\claude`.
+  (knobs in `./.env`). Bypass: `\claude`. Opt-in `CLAUDE_FORBID_DIRS` (`.env`
+  only) refuses a launch of a listed profile in/into a forbidden dir —
+  `_claude_forbid_check`, first thing in `_claude_exec`.
 - **`claude-profile`** — status (default), `use <name>|default` (persistent
   profile toggle, picker w/o name), `account <name>` (serial credential
   swap, picker w/o name; refuses under live sessions, `--force` =
