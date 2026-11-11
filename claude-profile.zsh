@@ -43,10 +43,38 @@ _claude_profile_py() {
 
 # ── launcher ────────────────────────────────────────────────────────────────
 
+# Refuse to launch a profile inside a tree it must never see.
+# CLAUDE_FORBID_DIRS (in ./.env): space-separated "<config-dir>:<forbidden-dir>"
+# pairs. Blocks when the seat being launched matches <config-dir> and either
+# the working directory or any existing-path argument (e.g. --add-dir) lies
+# inside <forbidden-dir>. Paths are compared physically (symlinks resolved).
+_claude_forbid_check() {
+  local CLAUDE_FORBID_DIRS
+  source "$_CLAUDE_PROFILE_HOME/.env" 2>/dev/null
+  [[ -n "$CLAUDE_FORBID_DIRS" ]] || return 0
+  local seat="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" pair cfg bad p a
+  seat="${seat:A}"
+  for pair in ${=CLAUDE_FORBID_DIRS}; do
+    cfg="${${pair%%:*}:A}" bad="${${pair#*:}:A}"
+    [[ "$seat" == "$cfg" ]] || continue
+    for p in "$PWD" "$@"; do
+      [[ -e "$p" ]] || continue
+      a="${p:A}"
+      if [[ "$a" == "$bad" || "$a" == "$bad"/* ]]; then
+        print -u2 "claude-profile: refusing to launch ${seat/#$HOME/~} with access to ${bad/#$HOME/~} (CLAUDE_FORBID_DIRS)."
+        return 1
+      fi
+    done
+  done
+  return 0
+}
+
 # Launch `command claude`, caffeinated on macOS unless opted out. Knobs live
 # in ./.env (sourced function-locally); a same-invocation env assignment
 # (CLAUDE_CAFFEINATE=0 claude) wins over .env.
 _claude_exec() {
+  _claude_forbid_check "$@" || return 1
+
   # Warm the statusline's caches for the seat we are about to launch into.
   # The statusline never blocks — it renders whatever is already cached and
   # refreshes behind itself. Invisible in a shell; very visible in Claude

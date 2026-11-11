@@ -232,3 +232,68 @@ ROTATE_SPY='_claude_profile_py() {
     zsh -c 'source "$1" >/dev/null 2>&1; _claude_profile_py status' _ "$CP_ZSH"
   [[ "$output" != *$'\033'* ]]
 }
+
+# --- CLAUDE_FORBID_DIRS launch guard -----------------------------------------
+# Opt-in via the wrapper's .env (here: the tmpdir copy's). "$HOME" in the value
+# expands when .env is sourced, so it lands on the fixture HOME.
+
+forbid() { printf 'CLAUDE_FORBID_DIRS="%s"\n' "$1" > "$CP_HOME/.env"; }
+
+@test "forbid: unset is a no-op (the profile launches anywhere)" {
+  mkdir -p "$FIXHOME/work/repo"
+  run_zsh 'cd $HOME/work/repo && CLAUDE_CONFIG_DIR=$HOME/.claude-personal claude --version'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAUDE argv=[--version]"* ]]
+}
+
+@test "forbid: refuses the listed profile inside the forbidden dir" {
+  forbid '$HOME/.claude-personal:$HOME/work'
+  mkdir -p "$FIXHOME/work/repo"
+  run_zsh 'cd $HOME/work/repo && CLAUDE_CONFIG_DIR=$HOME/.claude-personal claude --version'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing to launch"* ]]
+  [[ "$output" != *"CLAUDE argv"* ]]
+}
+
+@test "forbid: other profiles still launch there" {
+  forbid '$HOME/.claude-personal:$HOME/work'
+  mkdir -p "$FIXHOME/work/repo"
+  run_zsh 'cd $HOME/work/repo && claude --version'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dir=[<unset>]"* ]]
+}
+
+@test "forbid: the toggle and claude-with are caught too" {
+  forbid '$HOME/.claude-personal:$HOME/work'
+  mkdir -p "$FIXHOME/work"
+  run_zsh 'cd $HOME/work && claude-with personal --version'
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"CLAUDE argv"* ]]
+  run_zsh '_claude_profile_py use personal >/dev/null; cd $HOME/work && claude --version'
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"CLAUDE argv"* ]]
+}
+
+@test "forbid: an argument pointing into the forbidden dir is refused" {
+  forbid '$HOME/.claude-personal:$HOME/work'
+  mkdir -p "$FIXHOME/work/repo"
+  run_zsh 'cd $HOME && CLAUDE_CONFIG_DIR=$HOME/.claude-personal claude --add-dir $HOME/work/repo'
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"CLAUDE argv"* ]]
+}
+
+@test "forbid: a sibling sharing the name prefix is not forbidden" {
+  forbid '$HOME/.claude-personal:$HOME/work'
+  mkdir -p "$FIXHOME/work-private"
+  run_zsh 'cd $HOME/work-private && CLAUDE_CONFIG_DIR=$HOME/.claude-personal claude --version'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAUDE argv=[--version]"* ]]
+}
+
+@test "forbid: a symlink into the forbidden dir is resolved and refused" {
+  forbid '$HOME/.claude-personal:$HOME/work'
+  mkdir -p "$FIXHOME/work/repo"
+  ln -s "$FIXHOME/work/repo" "$FIXHOME/alias"
+  run_zsh 'cd $HOME/alias && CLAUDE_CONFIG_DIR=$HOME/.claude-personal claude --version'
+  [ "$status" -eq 1 ]
+}
