@@ -206,7 +206,7 @@ class DisplayLabels(unittest.TestCase):
             "work": {"dir": "~/.claude"},
             "pm-me": {"dir": "~/.claude-pm", "accounts": ["solo"]},
         },
-        "account_display": {"max5x": "Max 5x", "max20x": "Max 20x"},
+        "account_display": {"max5x": "Pro", "max20x": "Ultra"},
     }
 
     def test_display_falls_back_to_raw_name(self):
@@ -214,10 +214,10 @@ class DisplayLabels(unittest.TestCase):
         self.assertEqual(cp.profile_display(self.CFG, "pm-me"), "pm-me")
         self.assertEqual(cp.account_display(self.CFG, "solo"), "solo")
         self.assertEqual(cp.profile_display(self.CFG, "personal"), "Personal")
-        self.assertEqual(cp.account_display(self.CFG, "max5x"), "Max 5x")
+        self.assertEqual(cp.account_display(self.CFG, "max5x"), "Pro")
 
     def test_account_named_only_when_serial(self):
-        self.assertEqual(cp.compose_label(self.CFG, "personal", "max5x"), "Personal (Max 5x)")
+        self.assertEqual(cp.compose_label(self.CFG, "personal", "max5x"), "Personal (Pro)")
         # One account (or none): the profile name already identifies the seat.
         self.assertEqual(cp.compose_label(self.CFG, "pm-me", "solo"), "pm-me")
         self.assertEqual(cp.compose_label(self.CFG, "work", None), "work")
@@ -230,9 +230,9 @@ class DisplayLabels(unittest.TestCase):
             "profiles": {"personal": {"dir": "~/.claude",
                                       "accounts": ["max20x", "max5x"],
                                       "display": "Personal"}},
-            "account_display": {"max20x": "Max 20x"},
+            "account_display": {"max20x": "Ultra"},
         }
-        self.assertEqual(cp.compose_label(solo, "personal", "max20x"), "Max 20x")
+        self.assertEqual(cp.compose_label(solo, "personal", "max20x"), "Ultra")
 
     def test_single_profile_single_account_has_no_label(self):
         # Nothing varies, so there is nothing to say — an empty label is a
@@ -265,7 +265,7 @@ class ResolveJson(unittest.TestCase):
                              "display": "Personal"},
                 "work": {"dir": os.path.join(self.tmp, "work")},
             },
-            "account_display": {"max5x": "Max 5x", "max20x": "Max 20x"},
+            "account_display": {"max5x": "Pro", "max20x": "Ultra"},
         }
         self._load, self._state, self._cur = cp.load_config, cp.load_state, cp.current_account_of
         cp.load_config = lambda required=True: self.cfg
@@ -288,7 +288,7 @@ class ResolveJson(unittest.TestCase):
         self.assertTrue(out["active"])
         self.assertEqual(out["profile"], "personal")
         self.assertEqual(out["source"], "dir")
-        self.assertEqual(out["label"], "Personal (Max 5x)")
+        self.assertEqual(out["label"], "Personal (Pro)")
         self.assertEqual(out["schema"], cp.RESOLVE_SCHEMA)
 
     def test_unclaimed_dir_is_inactive_not_an_error(self):
@@ -304,7 +304,7 @@ class ResolveJson(unittest.TestCase):
         out = self.run_resolve(dir=self.pdir, accounts=True)
         by_name = {a["name"]: a for a in out["accounts"]}
         self.assertEqual(by_name["max20x"]["profile"], "personal")
-        self.assertEqual(by_name["max20x"]["label"], "Personal (Max 20x)")
+        self.assertEqual(by_name["max20x"]["label"], "Personal (Ultra)")
         self.assertFalse(by_name["max20x"]["live"])
         self.assertTrue(by_name["max5x"]["live"])
 

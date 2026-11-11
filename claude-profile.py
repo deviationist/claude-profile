@@ -339,9 +339,9 @@ def compose_label(cfg, profile, account):
 
         profiles  accounts  label
         1         1         ""                  nothing varies — say nothing
-        1         many      "Max 20x"           the account is the only variable
+        1         many      "Ultra"             the account is the only variable
         many      1         "Work"              the profile is the only variable
-        many      many      "Personal (Max 20x)"
+        many      many      "Personal (Ultra)"
 
     The empty case is deliberate. One profile holding one subscription can only
     ever be that seat, so a label there is decoration in a status line's

@@ -32,7 +32,7 @@ Three words, used precisely throughout:
 |---|---|---|
 | **profile** | a config dir | the state — sessions, memory, settings, per-project trust |
 | **account** | a subscription | the credential, i.e. whose quota a turn spends |
-| **seat** | the profile + account *currently* in effect | what a label like `Personal (Max 5x)` names |
+| **seat** | the profile + account *currently* in effect | what a label like `Personal (Pro)` names |
 
 The split is the reason a swap is cheap: accounts change underneath a profile
 that does not move, so nothing you have built up goes anywhere. It is also why
@@ -137,8 +137,8 @@ reads it:
     "user_agent": "<claude-code-user-agent>"
   },
   "account_display": {              // OPTIONAL — each account's half of that label
-    "max20x": "Max 20x",            // omitted account renders as its own key
-    "max5x":  "Max 5x"
+    "max20x": "Ultra",              // omitted account renders as its own key
+    "max5x":  "Pro"
   },
   "always_label": false             // OPTIONAL — true: name the account even when
                                     // the profile holds only one (see "Seat labels")
@@ -446,8 +446,8 @@ statusline — gets the answer here, in **one call**:
 ```console
 $ claude-profile resolve --json --dir ~/.claude-personal
 {"schema":1,"active":true,"profile":"personal","display":"Personal",
- "dir":"/Users/me/.claude-personal","account":"max5x","account_display":"Max 5x",
- "serial":true,"auto":true,"source":"dir","label":"Personal (Max 5x)"}
+ "dir":"/Users/me/.claude-personal","account":"max5x","account_display":"Pro",
+ "serial":true,"auto":true,"source":"dir","label":"Personal (Pro)"}
 ```
 
 `label` is the whole point: consumers render it **verbatim** rather than
@@ -464,9 +464,9 @@ naming rules live here, and they're configured, never derived:
   | profiles | accounts | label |
   |---|---|---|
   | 1 | 1 | *(empty)* — nothing varies, so nothing is said |
-  | 1 | many | `Max 20x` — the account is the only variable |
+  | 1 | many | `Ultra` — the account is the only variable |
   | many | 1 | `Work` |
-  | many | many | `Personal (Max 20x)` |
+  | many | many | `Personal (Ultra)` |
 
   The single-profile host is the case this exists for: `personal (max20x)`
   there would spend most of its width on a constant. And one profile holding

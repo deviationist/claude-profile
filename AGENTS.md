@@ -8,7 +8,7 @@ OAuth credential — environment persists bit-for-bit). Full docs: `README.md`.
 Three words, used precisely: a **profile** is a config dir and holds the state
 (sessions, memory, settings); an **account** is a subscription and is only a
 credential (whose quota a turn spends); a **seat** is the profile+account pair
-in effect, which is what a label like `Personal (Max 5x)` names. Sessions are
+in effect, which is what a label like `Personal (Pro)` names. Sessions are
 per-profile, so accounts are invisible to anything reading a config dir.
 
 - Config (user-edited): `~/.config/claude-profile/config.json`
@@ -131,7 +131,7 @@ What survives is the on-demand *access*-token grant: `_regrant_blob()` does
   title-casing heuristics, and each half included only when it disambiguates
   (profile named only if >1 profile exists, account only if the profile is
   serial or `always_label` is true; neither → **empty label**, a valid answer rather than a failure), so a
-  single-profile host renders `Max 20x` rather than `personal (max20x)`, and a
+  single-profile host renders `Ultra` rather than `personal (max20x)`, and a
   one-profile-one-account host renders nothing at all. `{"schema":1,"active":false}` at exit 0 = no config / unclaimed dir —
   an ordinary outcome, not an error. Invariants: **never touch the Keychain**
   on this path (`.claude.json` + snapshots only; it runs on a render loop), and
